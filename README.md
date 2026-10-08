@@ -13,11 +13,11 @@ Desktop builds are on the [Releases](https://github.com/agustinkassis/gorila-wal
 
 | System | File |
 |---|---|
-| macOS, Apple silicon (M-series) | `Gorilla Wallet_<version>_aarch64.dmg` |
-| macOS, Intel | `Gorilla Wallet_<version>_x64.dmg` |
-| Windows (x64 / ARM64) | `Gorilla Wallet_<version>_x64-setup.exe` / `_arm64-setup.exe` |
-| Linux, Intel/AMD | `Gorilla Wallet_<version>_amd64.AppImage` (standalone), `.deb`, `.rpm` |
-| Linux, ARM64 | `Gorilla Wallet_<version>_aarch64.AppImage` (standalone), `.deb`, `.rpm` |
+| macOS, Apple silicon (M-series) | `Gorilla.Wallet_<version>_aarch64.dmg` |
+| macOS, Intel | `Gorilla.Wallet_<version>_x64.dmg` |
+| Windows (x64 / ARM64) | `Gorilla.Wallet_<version>_x64-setup.exe` / `_arm64-setup.exe` |
+| Linux, Intel/AMD | `Gorilla.Wallet_<version>_amd64.AppImage` (standalone), `_amd64.deb`, `.x86_64.rpm` |
+| Linux, ARM64 | `Gorilla.Wallet_<version>_aarch64.AppImage` (standalone), `_arm64.deb`, `.aarch64.rpm` |
 
 The builds aren't signed yet: on macOS open it once via System Settings → Privacy & Security → Open Anyway; on Windows
 choose More info → Run anyway; on Linux `chmod +x` the AppImage and run it.

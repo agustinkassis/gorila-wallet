@@ -70,6 +70,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --draft --generate-notes --title "Gorilla Wallet $GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+      # artifacts keep their bundle folders (dmg/, nsis/, appimage/…); file names have spaces
+      - run: |
+          mapfile -d '' files < <(find dist -type f -print0)
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --draft --generate-notes --title "Gorilla Wallet $GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
