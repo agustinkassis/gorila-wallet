@@ -1,9 +1,11 @@
 // Transaction planning + PSBT building, shared by the browser (builds) and the server (re-validates).
 // All inputs are this wallet's P2WPKH coins. Chain differences live here and in lib/server/signer.ts.
 import { HDKey } from "@scure/bip32"
-import { Address, NETWORK, OutScript, Script, SigHash, Transaction, bip32Path, p2wpkh } from "@scure/btc-signer"
+import { Address, NETWORK, OutScript, Script, SigHash, Transaction, bip32Path, p2pkh, p2wpkh } from "@scure/btc-signer"
+import { secp256k1 } from "@noble/curves/secp256k1.js"
+import { base64 } from "@scure/base"
 import { hexToBytes } from "@noble/hashes/utils.js"
-import { SIGHASH_ALL_UNIFIED } from "@/lib/unified-sighash"
+import { SIGHASH_ALL_UNIFIED, SIGHASH_UNIFIED, unifiedSighash } from "@/lib/unified-sighash"
 import type { Chain } from "@/lib/wallet"
 
 export type Coin = { txid: string; vout: number; value: number; address: string; change: 0 | 1; index: number; height: number }
@@ -237,4 +239,76 @@ export function buildPsbt(
   }
   for (const out of shuffle(plan.outputs)) tx.addOutput({ script: out.script, amount: BigInt(out.amount) })
   return tx
+}
+
+const PSBT_MAGIC = [0x70, 0x73, 0x62, 0x74, 0xff] // "psbt\xff"
+const isPsbt = (b: Uint8Array) => PSBT_MAGIC.every((x, i) => b[i] === x)
+
+/** Whatever a signer hands back: PSBT bytes, base64 PSBT, or a raw tx in hex. */
+function decodeSigned(input: Uint8Array | string): Transaction {
+  const opts = { allowUnknownOutputs: true, allowUnknownInputs: true }
+  if (typeof input !== "string") return isPsbt(input) ? Transaction.fromPSBT(input, opts) : Transaction.fromRaw(input, { ...opts, disableScriptCheck: true })
+  const text = input.trim()
+  if (/^[0-9a-f]+$/i.test(text) && text.length % 2 === 0) {
+    const bytes = hexToBytes(text)
+    return isPsbt(bytes) ? Transaction.fromPSBT(bytes, opts) : Transaction.fromRaw(bytes, { ...opts, disableScriptCheck: true })
+  }
+  try {
+    return Transaction.fromPSBT(base64.decode(text), opts)
+  } catch {
+    throw new PlanError("Not a PSBT (base64 / binary) or a raw transaction (hex)")
+  }
+}
+
+/**
+ * Bring back a transaction signed elsewhere (hardware wallet, Sparrow, Knots…).
+ * Finalizes P2WPKH inputs from partial signatures, then checks it is exactly the transaction we built
+ * (same txid: same inputs, outputs, version, locktime) and that every signature is valid for this chain:
+ * BIP143 on Bitcoin, SIGHASH_UNIFIED (0x21, required) on Blake.
+ */
+export function importSigned(chain: Chain, unsignedPsbt: Uint8Array, input: Uint8Array | string) {
+  const expected = Transaction.fromPSBT(unsignedPsbt, { allowUnknownOutputs: true, allowUnknownInputs: true })
+  let tx: Transaction
+  try {
+    tx = decodeSigned(input)
+  } catch (e) {
+    throw e instanceof PlanError ? e : new PlanError("Couldn't read the signed transaction")
+  }
+  if (tx.id !== expected.id) throw new PlanError("This is a different transaction than the one you reviewed")
+
+  const spent = Array.from({ length: expected.inputsLength }, (_, i) => expected.getInput(i).witnessUtxo!)
+  const unsigned = {
+    version: expected.version,
+    lockTime: expected.lockTime,
+    inputs: Array.from({ length: expected.inputsLength }, (_, i) => {
+      const inp = expected.getInput(i)
+      return { txid: inp.txid!, index: inp.index!, sequence: inp.sequence ?? 0xffffffff }
+    }),
+    outputs: Array.from({ length: expected.outputsLength }, (_, i) => expected.getOutput(i) as { amount: bigint; script: Uint8Array }),
+  }
+
+  for (let i = 0; i < tx.inputsLength; i++) {
+    const inp = tx.getInput(i)
+    let witness = inp.finalScriptWitness
+    if (!witness?.length && inp.partialSig?.length) {
+      const [pub, sig] = inp.partialSig[0]
+      witness = [sig, pub]
+      tx.updateInput(i, { finalScriptWitness: witness }, true)
+    }
+    if (!witness || witness.length !== 2) throw new PlanError(`Input ${i + 1} isn't signed`)
+    const [sig, pub] = witness
+    if (!spent[i] || !p2wpkh(pub).script.every((b, j) => b === spent[i].script[j])) throw new PlanError(`Input ${i + 1} is signed by the wrong key`)
+    const hashType = sig[sig.length - 1]
+    let msg: Uint8Array
+    if (chain === "xbt") {
+      if (hashType !== SIGHASH_ALL_UNIFIED) throw new PlanError("Blake signatures must use SIGHASH_UNIFIED (0x21): this signer doesn't support Blake")
+      msg = unifiedSighash(unsigned, i, spent, SIGHASH_ALL_UNIFIED, 1, p2pkh(pub).script)
+    } else {
+      if (hashType & SIGHASH_UNIFIED) throw new PlanError("This is a Blake signature: Bitcoin rejects it")
+      if (hashType !== SigHash.ALL) throw new PlanError(`Input ${i + 1} uses an unexpected sighash (0x${hashType.toString(16)})`)
+      msg = expected.preimageWitnessV0(i, p2pkh(pub).script, hashType, spent[i].amount)
+    }
+    if (!secp256k1.verify(sig.slice(0, -1), msg, pub, { prehash: false, format: "der" })) throw new PlanError(`Input ${i + 1} has an invalid signature`)
+  }
+  return { hex: tx.hex, txid: tx.id, vsize: tx.vsize }
 }

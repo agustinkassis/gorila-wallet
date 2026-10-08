@@ -1,10 +1,33 @@
 import "server-only"
 import { nip19, nip98 } from "nostr-tools"
+import { config } from "@/lib/server/config"
+import { db } from "@/lib/server/db"
 
-const toHex = (key: string) => (key.startsWith("npub") ? (nip19.decode(key).data as string) : key.toLowerCase())
+export const toHexPubkey = (key: string) => {
+  const k = key.trim()
+  const hex = k.startsWith("npub") ? (nip19.decode(k).data as string) : k.toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error("Invalid Nostr public key")
+  return hex
+}
 
-function allowedPubkeys() {
-  return new Set((process.env.ALLOWED_PUBKEYS ?? "").split(",").map((k) => k.trim()).filter(Boolean).map(toHex))
+export const envPubkeys = () => new Set(config.allowedPubkeys.map(toHexPubkey))
+
+/**
+ * Allowed: ALLOWED_PUBKEYS plus accounts stored in the DB (managed in Settings).
+ * With neither, the first valid login claims the app (trust on first use). The claim is a unique
+ * insert, so two simultaneous first logins can't both become owner.
+ */
+async function isAllowed(pubkey: string) {
+  if (envPubkeys().has(pubkey)) return true
+  if (await db.account.findUnique({ where: { pubkey } })) return true
+  if (envPubkeys().size || (await db.account.count())) return false
+  try {
+    await db.setting.create({ data: { key: "owner", value: JSON.stringify(pubkey) } })
+  } catch {
+    return false // someone else claimed it first
+  }
+  await db.account.create({ data: { pubkey } })
+  return true
 }
 
 /**
@@ -19,7 +42,7 @@ export async function requireNostr(req: Request, body?: object): Promise<Respons
     const event = await nip98.unpackEventFromToken(header)
     await nip98.validateEvent(event, req.url, req.method, body)
     if (body && !event.tags.some(([t]) => t === "payload")) throw new Error("payload tag required")
-    if (!allowedPubkeys().has(event.pubkey)) return Response.json({ error: "Forbidden" }, { status: 403 })
+    if (!(await isAllowed(event.pubkey))) return Response.json({ error: "Forbidden" }, { status: 403 })
     return null
   } catch {
     return Response.json({ error: "Unauthorized" }, { status: 401 })

@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { ThemeProvider } from "next-themes"
 import { Geist, Geist_Mono } from "next/font/google"
 import { AppSidebar } from "@/components/app-sidebar"
 import { Gate } from "@/components/gate"
@@ -20,8 +21,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`} suppressHydrationWarning>
       <body className="min-h-full">
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
         <TooltipProvider>
           <NostrProvider>
             <WalletProvider>
@@ -37,7 +39,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </WalletProvider>
           </NostrProvider>
         </TooltipProvider>
-        <Toaster theme="dark" richColors position="bottom-right" />
+        <Toaster richColors position="bottom-right" />
+        </ThemeProvider>
       </body>
     </html>
   )

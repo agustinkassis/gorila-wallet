@@ -1,6 +1,7 @@
 import { authorizedJson, isChain, requireNostr } from "@/lib/server/auth"
 import { db } from "@/lib/server/db"
 import { republish, setLabel, type LabelType } from "@/lib/server/labels"
+import { getWallet } from "@/lib/server/wallets"
 
 const TYPES: LabelType[] = ["tx", "addr", "output"]
 const REF: Record<LabelType, RegExp> = {
@@ -10,12 +11,15 @@ const REF: Record<LabelType, RegExp> = {
 }
 
 /**
- * POST {chain: btc|xbt|all, type, ref, label?, spendable?} — set a label and/or freeze flag (spendable=false).
+ * POST {walletId, chain: btc|xbt|all, type, ref, label?, spendable?} — set a label and/or freeze flag (spendable=false).
  * Address labels use chain "all" (an address is the same on both chains); tx/output labels are per chain.
  */
 export async function POST(req: Request) {
-  const body = await authorizedJson<{ chain?: unknown; type?: unknown; ref?: unknown; label?: unknown; spendable?: unknown }>(req)
+  const body = await authorizedJson<{ walletId?: unknown; chain?: unknown; type?: unknown; ref?: unknown; label?: unknown; spendable?: unknown }>(req)
   if (body instanceof Response) return body
+  const wallet = await getWallet(body.walletId).catch(() => null)
+  if (!wallet) return Response.json({ error: "Unknown wallet" }, { status: 400 })
+  const walletId = wallet.id
   const { chain, type, ref } = body
   const label = typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 255) : null
   const spendable = typeof body.spendable === "boolean" ? body.spendable : null
@@ -23,19 +27,21 @@ export async function POST(req: Request) {
     return Response.json({ error: "Invalid label" }, { status: 400 })
   if (type === "addr" ? chain !== "all" : chain === "all") return Response.json({ error: "Invalid label scope" }, { status: 400 })
   // keep the existing value of whichever field wasn't sent
-  const current = await db.label.findUnique({ where: { chain_type_ref: { chain, type: type as string, ref } } })
-  await setLabel(chain, type as LabelType, ref, "label" in body ? label : (current?.label ?? null), "spendable" in body ? spendable : (current?.spendable ?? null))
-  await republish()
+  const current = await db.label.findUnique({ where: { walletId_chain_type_ref: { walletId, chain, type: type as string, ref } } })
+  await setLabel(walletId, chain, type as LabelType, ref, "label" in body ? label : (current?.label ?? null), "spendable" in body ? spendable : (current?.spendable ?? null))
+  await republish(walletId)
   return Response.json({ ok: true })
 }
 
-/** GET ?chain=btc|xbt → BIP-329 JSON Lines export for that chain (address labels included). */
+/** GET ?wallet=…&chain=btc|xbt → BIP-329 JSON Lines export of a wallet on a chain (address labels included). */
 export async function GET(req: Request) {
   const denied = await requireNostr(req)
   if (denied) return denied
-  const chain = new URL(req.url).searchParams.get("chain")
-  if (!isChain(chain)) return Response.json({ error: "Invalid chain" }, { status: 400 })
-  const rows = await db.label.findMany({ where: { chain: { in: [chain, "all"] } }, orderBy: [{ type: "asc" }, { ref: "asc" }] })
+  const params = new URL(req.url).searchParams
+  const chain = params.get("chain")
+  const wallet = await getWallet(params.get("wallet")).catch(() => null)
+  if (!isChain(chain) || !wallet) return Response.json({ error: "Invalid wallet or chain" }, { status: 400 })
+  const rows = await db.label.findMany({ where: { walletId: wallet.id, chain: { in: [chain, "all"] } }, orderBy: [{ type: "asc" }, { ref: "asc" }] })
   const lines = rows.map((r) =>
     JSON.stringify({
       type: r.type,

@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils"
 type Filter = Chain | "all"
 
 export default function UtxosPage() {
-  const { snapshots, chains } = useWallet()
+  const { snapshots, chains, wallet, watchOnly } = useWallet()
   const router = useRouter()
   const [filter, setFilter] = useState<Filter>("all")
   const [selected, setSelected] = useState<{ chain: Chain; ops: Set<string> } | null>(null)
@@ -45,7 +45,7 @@ export default function UtxosPage() {
 
   const freeze = async (chain: Chain, op: string, frozen: boolean) => {
     try {
-      await api("/api/labels", { chain, type: "output", ref: op, spendable: !frozen })
+      await api("/api/labels", { walletId: wallet!.id, chain, type: "output", ref: op, spendable: !frozen })
       toast.success(frozen ? "Coin frozen: it won't be spent" : "Coin unfrozen")
     } catch (e) {
       toast.error("Couldn't update coin", { description: (e as Error).message })
@@ -106,7 +106,12 @@ export default function UtxosPage() {
                 <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>
                   Clear
                 </Button>
-                <Button size="sm" onClick={() => router.push(`/send?chain=${selected.chain}&utxos=${[...selected.ops].join(",")}`)}>
+                <Button
+                  size="sm"
+                  disabled={watchOnly}
+                  title={watchOnly ? "Watch-only wallet: no keys to send" : undefined}
+                  onClick={() => router.push(`/send?chain=${selected.chain}&utxos=${[...selected.ops].join(",")}`)}
+                >
                   <SendIcon /> Send selected
                 </Button>
               </div>
@@ -151,13 +156,13 @@ export default function UtxosPage() {
                               {shorten(u.txid, 6)}:{u.vout}
                             </a>
                             {u.frozen && (
-                              <Badge variant="outline" className="gap-1 text-sky-400">
+                              <Badge variant="outline" className="gap-1 text-sky-600 dark:text-sky-400">
                                 <SnowflakeIcon /> Frozen
                               </Badge>
                             )}
-                            {u.height <= 0 && <Badge variant="outline" className="text-amber-400">Unconfirmed</Badge>}
+                            {u.height <= 0 && <Badge variant="outline" className="text-amber-600 dark:text-amber-400">Unconfirmed</Badge>}
                             {shared.has(op) && <Badge variant="outline">Both chains</Badge>}
-                            {uneconomical && <Badge variant="outline" className="text-rose-400">Uneconomical</Badge>}
+                            {uneconomical && <Badge variant="outline" className="text-rose-600 dark:text-rose-400">Uneconomical</Badge>}
                           </div>
                           <span className="text-xs text-muted-foreground">
                             {u.addr ? `${u.addr.change ? "change" : "receive"} #${u.addr.index}` : ""}
@@ -173,7 +178,7 @@ export default function UtxosPage() {
                       <TableCell className="hidden text-right font-mono text-xs sm:table-cell">{confs || "—"}</TableCell>
                       <TableCell className="pr-4 text-right sm:pr-2">
                         <div className="flex justify-end gap-0.5 sm:gap-1">
-                          {u.height <= 0 && !u.frozen && (
+                          {u.height <= 0 && !u.frozen && !watchOnly && (
                             <Button size="icon-sm" variant="ghost" title="Accelerate (CPFP)" onClick={() => router.push(`/send?chain=${u.chain}&cpfp=${op}`)}>
                               <RocketIcon />
                             </Button>

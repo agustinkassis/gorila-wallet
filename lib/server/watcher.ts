@@ -1,12 +1,13 @@
 import "server-only"
 import { Transaction } from "@scure/btc-signer"
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js"
+import { config } from "@/lib/server/config"
 import { db } from "@/lib/server/db"
 import { Electrum } from "@/lib/server/electrum"
-import { getAccount } from "@/lib/server/keys"
 import { getSettings } from "@/lib/server/settings"
+import { listWallets } from "@/lib/server/wallets"
 import { parseTxHex as parseTx } from "@/lib/tx"
-import { addressScript, deriveAddress, scriptHash, type Chain, type Fees, type Snapshot } from "@/lib/wallet"
+import { addressScript, deriveAddress, scriptHash, type Chain, type Fees, type Snapshot, type WalletInfo } from "@/lib/wallet"
 
 type Listener = (s: Snapshot) => void
 type HistoryItem = { tx_hash: string; height: number }
@@ -21,24 +22,17 @@ export { parseTxHex as parseTx } from "@/lib/tx"
 const COINBASE = "0".repeat(64)
 
 /**
- * One chain's sync engine. Electrum is the source of truth; SQLite is the warm, indexed cache.
- * Electrum-style: subscribe every address, compare its status hash with the stored one, and only
- * resync addresses whose status changed. Gap-limit discovery on the receive and change branches.
+ * One chain: a single Electrum connection shared by every wallet, plus chain-wide caches
+ * (raw txs, block times, fee estimates). Scripthash notifications are routed to the wallets that own them.
  */
-class Watcher {
-  snapshot: Snapshot
+class ChainClient {
   readonly client: Electrum
-  private listeners = new Set<Listener>()
-  /** scripthash -> address, for this connection's subscriptions */
-  private subscribed = new Map<string, AddressRow>()
-  /** scripthash -> latest status from Electrum, waiting to be synced */
-  private dirty = new Map<string, string | null>()
-  private scripts = new Set<string>()
+  height = 0
+  fees: Fees | null = null
+  readonly syncs = new Map<string, WalletSync>()
+  private routes = new Map<string, Set<WalletSync>>()
   private txCache = new Map<string, Promise<Transaction>>()
   private timeCache = new Map<number, Promise<number>>()
-  private running = false
-  private again = false
-  private debounce?: NodeJS.Timeout
   private feeTimer?: NodeJS.Timeout
 
   constructor(
@@ -46,213 +40,61 @@ class Watcher {
     urls: string[],
     readonly mempool: string,
   ) {
-    this.snapshot = {
-      chain,
-      connected: false,
-      synced: false,
-      server: null,
-      height: 0,
-      explorer: mempool,
-      fees: null,
-      addresses: [],
-      utxos: [],
-      txs: [],
-    }
     this.client = new Electrum(urls, {
       onConnect: () => {
-        this.subscribed.clear()
+        this.routes.clear() // subscriptions belong to the old connection
         void this.client
           .request<{ height: number }>("blockchain.headers.subscribe")
           .then((tip) => {
-            this.snapshot.height = tip.height
-            this.kick()
+            this.height = tip.height
+            for (const s of this.syncs.values()) s.reconnected()
           })
           .catch(() => {})
       },
-      onDisconnect: () => this.emit({ ...this.snapshot, connected: false }),
+      onDisconnect: () => this.syncs.forEach((s) => s.refreshMeta()),
       onNotify: (method, params) => {
         if (method === "blockchain.headers.subscribe") {
-          this.emit({ ...this.snapshot, height: (params[0] as { height: number }).height })
+          this.height = (params[0] as { height: number }).height
+          this.syncs.forEach((s) => s.refreshMeta())
         } else if (method === "blockchain.scripthash.subscribe") {
-          this.dirty.set(params[0] as string, params[1] as string | null)
-          clearTimeout(this.debounce)
-          this.debounce = setTimeout(() => this.kick(), 300)
+          this.routes.get(params[0] as string)?.forEach((s) => s.markDirty(params[0] as string, params[1] as string | null))
         }
       },
     })
-    void this.publish().catch(() => {}) // warm start: last known state from SQLite, before Electrum answers
     void this.pollFees()
     this.feeTimer = setInterval(() => void this.pollFees(), 60_000)
   }
 
-  /** Shut down (extension disabled). Cached data stays in SQLite for a warm restart. */
+  get connected() {
+    return this.client.connected
+  }
+
+  /** Subscribe a wallet to a scripthash (several wallets may share one) and return its current status. */
+  subscribe(sh: string, sync: WalletSync) {
+    let set = this.routes.get(sh)
+    if (!set) this.routes.set(sh, (set = new Set()))
+    set.add(sync)
+    return this.client.request<string | null>("blockchain.scripthash.subscribe", [sh])
+  }
+
+  unroute(sync: WalletSync) {
+    for (const set of this.routes.values()) set.delete(sync)
+  }
+
   stop() {
     clearInterval(this.feeTimer)
-    clearTimeout(this.debounce)
-    this.listeners.clear()
+    this.syncs.forEach((s) => s.stop())
+    this.syncs.clear()
     this.client.close()
-  }
-
-  subscribe(listener: Listener) {
-    this.listeners.add(listener)
-    return () => void this.listeners.delete(listener)
-  }
-
-  private emit(s: Snapshot) {
-    this.snapshot = s
-    for (const l of this.listeners) l(s)
-  }
-
-  /** Discovery + sync loop. Single-flight: notifications during a run just schedule another pass. */
-  kick() {
-    if (this.running) return void (this.again = true)
-    this.running = true
-    void (async () => {
-      try {
-        do {
-          this.again = false
-          const added = await this.discover()
-          await this.syncDirty()
-          if (added) this.again = true // new addresses may be used: re-check the gap after syncing them
-          await this.publish()
-        } while (this.again)
-      } catch {
-        // connection dropped mid-sync: Electrum reconnects and kicks again
-      } finally {
-        this.running = false
-      }
-    })()
-  }
-
-  /** Derive addresses until each branch has `gap` unused ones past the last used (on any chain); subscribe new ones. */
-  private async discover() {
-    const { xpub } = getAccount()
-    const settings = await getSettings()
-    const [rows, used, states] = await Promise.all([
-      db.address.findMany(),
-      db.addressState.findMany({ where: { used: true }, select: { address: true } }),
-      db.addressState.findMany({ where: { chain: this.chain }, select: { address: true, status: true } }),
-    ])
-    const usedSet = new Set(used.map((u) => u.address))
-    const all: AddressRow[] = [...rows]
-    let added = false
-    for (const change of [0, 1] as const) {
-      const branch = all.filter((r) => r.change === change)
-      const lastUsed = Math.max(-1, ...branch.filter((r) => usedSet.has(r.address)).map((r) => r.index))
-      const want = lastUsed + 1 + (change ? settings.gapChange : settings.gapReceive)
-      for (let index = branch.length; index < want; index++) {
-        const { address } = deriveAddress(xpub, change, index)
-        const row = { address, change, index, scripthash: scriptHash(address) }
-        await db.address.upsert({ where: { address }, create: row, update: {} }) // both chains derive the same rows
-        all.push(row)
-        added = true
-      }
-    }
-    const stored = new Map(states.map((s) => [s.address, s.status]))
-    const fresh = all.filter((a) => !this.subscribed.has(a.scripthash))
-    await Promise.all(
-      fresh.map(async (a) => {
-        this.subscribed.set(a.scripthash, a)
-        this.scripts.add(bytesToHex(addressScript(a.address)))
-        const status = await this.client.request<string | null>("blockchain.scripthash.subscribe", [a.scripthash])
-        if (!stored.has(a.address) || stored.get(a.address) !== status) this.dirty.set(a.scripthash, status)
-      }),
-    )
-    return added
-  }
-
-  /** Refetch only addresses whose Electrum status changed, then write everything in one DB transaction. */
-  private async syncDirty() {
-    const batch = [...this.dirty]
-    this.dirty.clear()
-    if (!batch.length) return
-    const c = this.client
-    const chain = this.chain
-    try {
-      const results = await Promise.all(
-        batch.map(async ([sh, status]) => {
-          const [history, unspent, balance] = await Promise.all([
-            c.request<HistoryItem[]>("blockchain.scripthash.get_history", [sh]),
-            c.request<Unspent[]>("blockchain.scripthash.listunspent", [sh]),
-            c.request<Balance>("blockchain.scripthash.get_balance", [sh]),
-          ])
-          return { address: this.subscribed.get(sh)!.address, status, history, unspent, balance }
-        }),
-      )
-      const heights = new Map(results.flatMap((r) => r.history.map((h) => [h.tx_hash, h.height] as const)))
-      const txRows = await Promise.all(
-        [...heights].map(async ([txid, height]) => ({
-          chain,
-          txid,
-          height,
-          time: height > 0 ? await this.blockTime(height) : null,
-          ...(await this.describe(txid)),
-        })),
-      )
-      await db.$transaction([
-        ...results.flatMap((r) => {
-          const state = {
-            status: r.status,
-            used: r.history.length > 0,
-            confirmed: BigInt(r.balance.confirmed),
-            unconfirmed: BigInt(r.balance.unconfirmed),
-            history: JSON.stringify(r.history.map((h) => [h.tx_hash, h.height])),
-          }
-          return [
-            db.addressState.upsert({
-              where: { chain_address: { chain, address: r.address } },
-              create: { chain, address: r.address, ...state },
-              update: state,
-            }),
-            db.utxo.deleteMany({ where: { chain, address: r.address } }),
-            db.utxo.createMany({
-              data: r.unspent.map((u) => ({ chain, txid: u.tx_hash, vout: u.tx_pos, address: r.address, value: BigInt(u.value), height: u.height })),
-            }),
-          ]
-        }),
-        ...txRows.map((t) => db.tx.upsert({ where: { chain_txid: { chain, txid: t.txid } }, create: t, update: t })),
-      ])
-      // Drop txs no address references any more (replaced by RBF or evicted from the mempool).
-      const histories = await db.addressState.findMany({ where: { chain }, select: { history: true } })
-      const live = histories.flatMap((h) => (JSON.parse(h.history) as [string, number][]).map(([txid]) => txid))
-      await db.tx.deleteMany({ where: { chain, txid: { notIn: live } } })
-    } catch (e) {
-      for (const [sh, status] of batch) if (!this.dirty.has(sh)) this.dirty.set(sh, status) // retry next pass
-      throw e
-    }
-  }
-
-  /** Net effect on our scripts, fee and vsize. Parents come from the raw-tx cache (fetched once, kept forever). */
-  private async describe(txid: string) {
-    const tx = await this.getTx(txid)
-    let amount = 0n
-    let totalOut = 0n
-    let totalIn: bigint | null = 0n
-    for (let i = 0; i < tx.outputsLength; i++) {
-      const out = tx.getOutput(i)
-      totalOut += out.amount ?? 0n
-      if (out.script && this.scripts.has(bytesToHex(out.script))) amount += out.amount ?? 0n
-    }
-    for (let i = 0; i < tx.inputsLength; i++) {
-      const { txid: prevId, index } = tx.getInput(i)
-      const prevHex = prevId ? bytesToHex(prevId) : COINBASE
-      if (prevHex === COINBASE || index === undefined) {
-        totalIn = null
-        continue
-      }
-      const prev = (await this.getTx(prevHex)).getOutput(index)
-      if (totalIn !== null) totalIn += prev.amount ?? 0n
-      if (prev.script && this.scripts.has(bytesToHex(prev.script))) amount -= prev.amount ?? 0n
-    }
-    return { amount, fee: totalIn === null ? null : totalIn - totalOut, vsize: tx.vsize }
   }
 
   /** Raw tx hex: SQLite cache first, then Electrum (and cache it — raw txs never change). */
   async rawHex(txid: string) {
-    const row = await db.rawTx.findUnique({ where: { chain_txid: { chain: this.chain, txid } } })
+    const where = { chain_txid: { chain: this.chain, txid } }
+    const row = await db.rawTx.findUnique({ where })
     if (row) return row.hex
     const hex = await this.client.request<string>("blockchain.transaction.get", [txid])
-    await db.rawTx.upsert({ where: { chain_txid: { chain: this.chain, txid } }, create: { chain: this.chain, txid, hex }, update: {} })
+    await db.rawTx.upsert({ where, create: { chain: this.chain, txid, hex }, update: {} })
     return hex
   }
 
@@ -267,7 +109,7 @@ class Watcher {
   }
 
   // ponytail: cached by height only; a reorg changes a timestamp by minutes at most.
-  private blockTime(height: number) {
+  blockTime(height: number) {
     let p = this.timeCache.get(height)
     if (!p) {
       p = (async () => {
@@ -298,25 +140,264 @@ class Watcher {
         fees = { fastestFee, halfHourFee, hourFee, economyFee, minimumFee }
       } catch {}
     }
-    if (fees) this.emit({ ...this.snapshot, fees })
+    if (fees) {
+      this.fees = fees
+      this.syncs.forEach((s) => s.refreshMeta())
+    }
+  }
+}
+
+/**
+ * One wallet on one chain. Electrum is the source of truth; SQLite is the warm, indexed cache.
+ * Electrum-style: subscribe every address, compare its status hash with the stored one, and only
+ * resync addresses whose status changed. Gap-limit discovery on the receive and change branches.
+ */
+class WalletSync {
+  snapshot: Snapshot
+  private listeners = new Set<Listener>()
+  /** scripthashes subscribed on the current connection */
+  private subscribed = new Map<string, AddressRow>()
+  /** scripthash -> latest status from Electrum, waiting to be synced */
+  private dirty = new Map<string, string | null>()
+  private scripts = new Set<string>()
+  private running = false
+  private again = false
+  private stopped = false
+  private debounce?: NodeJS.Timeout
+
+  constructor(
+    readonly wallet: WalletInfo,
+    readonly chain: ChainClient,
+  ) {
+    this.snapshot = {
+      walletId: wallet.id,
+      chain: chain.chain,
+      connected: false,
+      synced: false,
+      server: null,
+      height: 0,
+      explorer: chain.mempool,
+      fees: null,
+      addresses: [],
+      utxos: [],
+      txs: [],
+    }
+    void this.publish().catch(() => {}) // warm start: last known state from SQLite, before Electrum answers
+    if (chain.connected) this.kick()
+  }
+
+  get walletId() {
+    return this.wallet.id
+  }
+
+  subscribe(listener: Listener) {
+    this.listeners.add(listener)
+    return () => void this.listeners.delete(listener)
+  }
+
+  stop() {
+    this.stopped = true
+    clearTimeout(this.debounce)
+    this.listeners.clear()
+    this.chain.unroute(this)
+  }
+
+  private emit(s: Snapshot) {
+    if (this.stopped) return
+    this.snapshot = s
+    for (const l of this.listeners) l(s)
+  }
+
+  /** Connection, tip or fees changed: re-emit without touching the DB. */
+  refreshMeta() {
+    this.emit({
+      ...this.snapshot,
+      connected: this.chain.connected,
+      server: this.chain.connected ? this.chain.client.server : this.snapshot.server,
+      height: this.chain.height,
+      fees: this.chain.fees,
+    })
+  }
+
+  reconnected() {
+    this.subscribed.clear()
+    this.kick()
+  }
+
+  markDirty(sh: string, status: string | null) {
+    this.dirty.set(sh, status)
+    clearTimeout(this.debounce)
+    this.debounce = setTimeout(() => this.kick(), 300)
+  }
+
+  /** Discovery + sync loop. Single-flight: notifications during a run just schedule another pass. */
+  kick() {
+    if (this.running) return void (this.again = true)
+    this.running = true
+    void (async () => {
+      try {
+        do {
+          this.again = false
+          const added = await this.discover()
+          await this.syncDirty()
+          if (added) this.again = true // new addresses may be used: re-check the gap after syncing them
+          await this.publish()
+        } while (this.again && !this.stopped)
+      } catch {
+        // connection dropped mid-sync: Electrum reconnects and kicks again
+      } finally {
+        this.running = false
+      }
+    })()
+  }
+
+  /** Derive addresses until each branch has `gap` unused ones past the last used (on any chain); subscribe new ones. */
+  private async discover() {
+    if (this.stopped) return false
+    const walletId = this.walletId
+    const settings = await getSettings()
+    const [rows, used, states] = await Promise.all([
+      db.address.findMany({ where: { walletId } }),
+      db.addressState.findMany({ where: { walletId, used: true }, select: { address: true } }),
+      db.addressState.findMany({ where: { walletId, chain: this.chain.chain }, select: { address: true, status: true } }),
+    ])
+    const usedSet = new Set(used.map((u) => u.address))
+    const all: AddressRow[] = [...rows]
+    let added = false
+    for (const change of [0, 1] as const) {
+      const branch = all.filter((r) => r.change === change)
+      const lastUsed = Math.max(-1, ...branch.filter((r) => usedSet.has(r.address)).map((r) => r.index))
+      const want = lastUsed + 1 + (change ? settings.gapChange : settings.gapReceive)
+      for (let index = branch.length; index < want; index++) {
+        const { address } = deriveAddress(this.wallet.xpub, change, index)
+        const row = { address, change, index, scripthash: scriptHash(address) }
+        // both chains derive the same rows for a wallet
+        await db.address.upsert({ where: { walletId_address: { walletId, address } }, create: { walletId, ...row }, update: {} })
+        all.push(row)
+        added = true
+      }
+    }
+    const stored = new Map(states.map((s) => [s.address, s.status]))
+    const fresh = all.filter((a) => !this.subscribed.has(a.scripthash))
+    await Promise.all(
+      fresh.map(async (a) => {
+        this.subscribed.set(a.scripthash, a)
+        this.scripts.add(bytesToHex(addressScript(a.address)))
+        const status = await this.chain.subscribe(a.scripthash, this)
+        if (!stored.has(a.address) || stored.get(a.address) !== status) this.dirty.set(a.scripthash, status)
+      }),
+    )
+    return added
+  }
+
+  /** Refetch only addresses whose Electrum status changed, then write everything in one DB transaction. */
+  private async syncDirty() {
+    const batch = [...this.dirty].filter(([sh]) => this.subscribed.has(sh))
+    this.dirty.clear()
+    if (!batch.length || this.stopped) return
+    const c = this.chain.client
+    const chain = this.chain.chain
+    const walletId = this.walletId
+    try {
+      const results = await Promise.all(
+        batch.map(async ([sh, status]) => {
+          const [history, unspent, balance] = await Promise.all([
+            c.request<HistoryItem[]>("blockchain.scripthash.get_history", [sh]),
+            c.request<Unspent[]>("blockchain.scripthash.listunspent", [sh]),
+            c.request<Balance>("blockchain.scripthash.get_balance", [sh]),
+          ])
+          return { address: this.subscribed.get(sh)!.address, status, history, unspent, balance }
+        }),
+      )
+      const heights = new Map(results.flatMap((r) => r.history.map((h) => [h.tx_hash, h.height] as const)))
+      const txRows = await Promise.all(
+        [...heights].map(async ([txid, height]) => ({
+          walletId,
+          chain,
+          txid,
+          height,
+          time: height > 0 ? await this.chain.blockTime(height) : null,
+          ...(await this.describe(txid)),
+        })),
+      )
+      await db.$transaction([
+        ...results.flatMap((r) => {
+          const state = {
+            status: r.status,
+            used: r.history.length > 0,
+            confirmed: BigInt(r.balance.confirmed),
+            unconfirmed: BigInt(r.balance.unconfirmed),
+            history: JSON.stringify(r.history.map((h) => [h.tx_hash, h.height])),
+          }
+          return [
+            db.addressState.upsert({
+              where: { walletId_chain_address: { walletId, chain, address: r.address } },
+              create: { walletId, chain, address: r.address, ...state },
+              update: state,
+            }),
+            db.utxo.deleteMany({ where: { walletId, chain, address: r.address } }),
+            db.utxo.createMany({
+              data: r.unspent.map((u) => ({ walletId, chain, txid: u.tx_hash, vout: u.tx_pos, address: r.address, value: BigInt(u.value), height: u.height })),
+            }),
+          ]
+        }),
+        ...txRows.map((t) => db.tx.upsert({ where: { walletId_chain_txid: { walletId, chain, txid: t.txid } }, create: t, update: t })),
+      ])
+      // Drop txs no address references any more (replaced by RBF or evicted from the mempool).
+      const histories = await db.addressState.findMany({ where: { walletId, chain }, select: { history: true } })
+      const live = histories.flatMap((h) => (JSON.parse(h.history) as [string, number][]).map(([txid]) => txid))
+      await db.tx.deleteMany({ where: { walletId, chain, txid: { notIn: live } } })
+    } catch (e) {
+      for (const [sh, status] of batch) if (!this.dirty.has(sh)) this.dirty.set(sh, status) // retry next pass
+      throw e
+    }
+  }
+
+  /** Net effect on this wallet's scripts, fee and vsize. Parents come from the chain's raw-tx cache. */
+  private async describe(txid: string) {
+    const tx = await this.chain.getTx(txid)
+    let amount = 0n
+    let totalOut = 0n
+    let totalIn: bigint | null = 0n
+    for (let i = 0; i < tx.outputsLength; i++) {
+      const out = tx.getOutput(i)
+      totalOut += out.amount ?? 0n
+      if (out.script && this.scripts.has(bytesToHex(out.script))) amount += out.amount ?? 0n
+    }
+    for (let i = 0; i < tx.inputsLength; i++) {
+      const { txid: prevId, index } = tx.getInput(i)
+      const prevHex = prevId ? bytesToHex(prevId) : COINBASE
+      if (prevHex === COINBASE || index === undefined) {
+        totalIn = null
+        continue
+      }
+      const prev = (await this.chain.getTx(prevHex)).getOutput(index)
+      if (totalIn !== null) totalIn += prev.amount ?? 0n
+      if (prev.script && this.scripts.has(bytesToHex(prev.script))) amount -= prev.amount ?? 0n
+    }
+    return { amount, fee: totalIn === null ? null : totalIn - totalOut, vsize: tx.vsize }
   }
 
   /** Rebuild the snapshot from SQLite (labels and frozen flags joined in) and broadcast it. */
   async publish() {
-    const chain = this.chain
+    if (this.stopped) return
+    const chain = this.chain.chain
+    const walletId = this.walletId
     const [addresses, states, utxos, txs, labels] = await Promise.all([
-      db.address.findMany({ orderBy: [{ change: "asc" }, { index: "asc" }] }),
-      db.addressState.findMany({ where: { chain } }),
-      db.utxo.findMany({ where: { chain }, orderBy: { value: "desc" } }),
-      db.tx.findMany({ where: { chain } }),
-      db.label.findMany({ where: { chain: { in: [chain, "all"] } } }),
+      db.address.findMany({ where: { walletId }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
+      db.addressState.findMany({ where: { walletId, chain } }),
+      db.utxo.findMany({ where: { walletId, chain }, orderBy: { value: "desc" } }),
+      db.tx.findMany({ where: { walletId, chain } }),
+      db.label.findMany({ where: { walletId, chain: { in: [chain, "all"] } } }),
     ])
     const state = new Map(states.map((s) => [s.address, s]))
     const label = new Map(labels.map((l) => [`${l.type}:${l.ref}`, l]))
     this.emit({
       ...this.snapshot,
-      connected: this.client.connected,
-      server: this.client.connected ? this.client.server : this.snapshot.server,
+      connected: this.chain.connected,
+      server: this.chain.connected ? this.chain.client.server : this.snapshot.server,
+      height: this.chain.height || this.snapshot.height,
+      fees: this.chain.fees,
       synced: states.length > 0,
       addresses: addresses.map((a) => {
         const s = state.get(a.address)
@@ -355,14 +436,11 @@ class Watcher {
   }
 }
 
-export type { Watcher }
+export type { ChainClient, WalletSync }
 
-/** Comma-separated list of tcp:// or ssl:// Electrum URLs, tried in order. */
-const servers = (list: string) => list.split(",").map((u) => u.trim()).filter(Boolean)
-
-// Survive dev hot reloads: one watcher (and one Electrum socket) per chain per process.
-const g = globalThis as typeof globalThis & { watchers?: Partial<Record<Chain, Watcher>>; watcherListeners?: Set<() => void> }
-const changeListeners = (g.watcherListeners ??= new Set())
+// Survive dev hot reloads: one ChainClient (one Electrum socket) per chain per process.
+const g = globalThis as typeof globalThis & { chains?: Partial<Record<Chain, ChainClient>>; syncListeners?: Set<() => void> }
+const changeListeners = (g.syncListeners ??= new Set())
 
 export class ExtensionDisabledError extends Error {
   constructor() {
@@ -370,45 +448,59 @@ export class ExtensionDisabledError extends Error {
   }
 }
 
-/** Active watchers right now (no I/O): Bitcoin always, Blake while the Blake2b extension is on. */
-export const currentWatchers = (): Partial<Record<Chain, Watcher>> => g.watchers ?? {}
+/** Active chain clients right now (no I/O): Bitcoin always, Blake while the Blake2b extension is on. */
+export const currentChains = (): Partial<Record<Chain, ChainClient>> => g.chains ?? {}
+/** Every active wallet sync, across chains. */
+export const currentSyncs = () => Object.values(currentChains()).flatMap((c) => [...c!.syncs.values()])
 
-/** Notified when a watcher starts or stops (the SSE stream re-subscribes). */
-export const onWatchersChange = (l: () => void) => (changeListeners.add(l), () => void changeListeners.delete(l))
+/** Notified when a chain or wallet sync starts or stops (the SSE stream re-subscribes). */
+export const onSyncsChange = (l: () => void) => (changeListeners.add(l), () => void changeListeners.delete(l))
 
-/** Start/stop watchers to match settings: Bitcoin is core, Blake (XBT) is the Blake2b extension. */
+/** Start/stop chains and per-wallet syncs to match settings and the wallet list. */
 export async function syncWatchers() {
-  getAccount() // fail fast when the wallet isn't configured
-  const { blake } = await getSettings()
-  const w = (g.watchers ??= {})
+  const [{ blake }, wallets] = await Promise.all([getSettings(), listWallets()])
+  const chains = (g.chains ??= {})
   let changed = false
-  if (!w.btc) {
-    w.btc = new Watcher(
-      "btc",
-      servers(process.env.BTC_ELECTRUM || "ssl://electrum.blockstream.info:50002"),
-      process.env.MEMPOOL_BTC_URL || "https://mempool.space",
-    )
-    changed = true
-  }
-  if (blake && !w.xbt) {
-    w.xbt = new Watcher(
-      "xbt",
-      servers(process.env.XBT_ELECTRUM || "tcp://fulcrum.kilombino.com:17717"),
-      process.env.MEMPOOL_XBT_URL || "https://mempool.kilombino.com",
-    )
-    changed = true
-  } else if (!blake && w.xbt) {
-    w.xbt.stop()
-    delete w.xbt
-    changed = true
+  const want: Record<Chain, boolean> = { btc: true, xbt: blake }
+  for (const chain of ["btc", "xbt"] as const) {
+    if (want[chain] && !chains[chain]) {
+      chains[chain] = new ChainClient(chain, config.electrum[chain], config.mempool[chain])
+      changed = true
+    } else if (!want[chain] && chains[chain]) {
+      chains[chain]!.stop()
+      delete chains[chain]
+      changed = true
+    }
+    const client = chains[chain]
+    if (!client) continue
+    for (const [id, sync] of client.syncs) {
+      const w = wallets.find((x) => x.id === id)
+      if (!w || w.xpub !== sync.wallet.xpub) {
+        sync.stop()
+        client.syncs.delete(id)
+        changed = true
+      }
+    }
+    for (const w of wallets)
+      if (!client.syncs.has(w.id)) {
+        client.syncs.set(w.id, new WalletSync(w, client))
+        changed = true
+      }
   }
   if (changed) for (const l of changeListeners) l()
-  return w
+  return chains
 }
 
-/** The watcher for `chain`, or ExtensionDisabledError when that chain's extension is off. */
-export async function watcherFor(chain: Chain) {
-  const w = (await syncWatchers())[chain]
-  if (!w) throw new ExtensionDisabledError()
-  return w
+/** The chain client, or ExtensionDisabledError when that chain's extension is off. */
+export async function chainFor(chain: Chain) {
+  const c = (await syncWatchers())[chain]
+  if (!c) throw new ExtensionDisabledError()
+  return c
+}
+
+/** A wallet's sync on a chain. */
+export async function syncFor(walletId: string, chain: Chain) {
+  const s = (await chainFor(chain)).syncs.get(walletId)
+  if (!s) throw new Error("Unknown wallet")
+  return s
 }

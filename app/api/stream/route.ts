@@ -1,24 +1,24 @@
 import { requireNostr } from "@/lib/server/auth"
-import { getAccount } from "@/lib/server/keys"
 import { getSettings, onSettings } from "@/lib/server/settings"
-import { currentWatchers, onWatchersChange, syncWatchers } from "@/lib/server/watcher"
-import type { Chain, StreamMessage } from "@/lib/wallet"
+import { currentSyncs, onSyncsChange, syncWatchers, type WalletSync } from "@/lib/server/watcher"
+import { listWallets, onWalletsChange } from "@/lib/server/wallets"
+import type { StreamMessage } from "@/lib/wallet"
 
 /**
- * SSE: `init` (xpub, path, fingerprint), settings, then live per-chain snapshots. One NIP-98 signature per connection.
- * Chains follow the active watchers: toggling the Blake2b extension adds/drops XBT on open streams.
+ * SSE: the wallet list, settings, then live snapshots for every wallet on every active chain.
+ * One NIP-98 signature per connection; switching wallets in the UI needs no reconnect.
+ * Follows changes live: wallets added/removed, the Blake2b extension toggled.
  */
 export async function GET(req: Request) {
   const denied = await requireNostr(req)
   if (denied) return denied
 
-  let account, settings
+  let settings, wallets
   try {
-    account = getAccount()
     await syncWatchers()
-    settings = await getSettings()
+    ;[settings, wallets] = await Promise.all([getSettings(), listWallets()])
   } catch {
-    return Response.json({ error: "Wallet is not configured" }, { status: 500 })
+    return Response.json({ error: "Server not ready" }, { status: 500 })
   }
 
   const enc = new TextEncoder()
@@ -34,32 +34,34 @@ export async function GET(req: Request) {
       }
       const send = (msg: StreamMessage) => write(`data: ${JSON.stringify(msg)}\n\n`)
 
-      send({ type: "init", xpub: account.xpub, path: account.path, fingerprint: account.fingerprint })
+      send({ type: "wallets", wallets })
       send({ type: "settings", settings })
-      const chains = new Map<Chain, () => void>()
+      const subs = new Map<WalletSync, () => void>()
       const attach = () => {
-        const active = currentWatchers()
-        for (const [chain, unsub] of chains)
-          if (!active[chain]) {
+        const active = new Set(currentSyncs())
+        for (const [sync, unsub] of subs)
+          if (!active.has(sync)) {
             unsub()
-            chains.delete(chain)
+            subs.delete(sync)
           }
-        for (const w of Object.values(active))
-          if (w && !chains.has(w.chain)) {
-            send({ type: "snapshot", snapshot: w.snapshot })
-            chains.set(w.chain, w.subscribe((snapshot) => send({ type: "snapshot", snapshot })))
+        for (const sync of active)
+          if (!subs.has(sync)) {
+            send({ type: "snapshot", snapshot: sync.snapshot })
+            subs.set(sync, sync.subscribe((snapshot) => send({ type: "snapshot", snapshot })))
           }
       }
       attach()
-      const offWatchers = onWatchersChange(attach)
+      const offSyncs = onSyncsChange(attach)
       const offSettings = onSettings((s) => send({ type: "settings", settings: s }))
+      const offWallets = onWalletsChange(() => void listWallets().then((w) => send({ type: "wallets", wallets: w })))
       const ping = setInterval(() => write(": ping\n\n"), 25_000)
       cleanup = () => {
         clearInterval(ping)
-        offWatchers()
+        offSyncs()
         offSettings()
-        chains.forEach((u) => u())
-        chains.clear()
+        offWallets()
+        subs.forEach((u) => u())
+        subs.clear()
       }
       req.signal.addEventListener("abort", () => {
         cleanup()

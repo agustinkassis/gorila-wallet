@@ -18,6 +18,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useWallet } from "@/components/wallet-provider"
+import { WalletSwitcher } from "@/components/wallet-switcher"
 import { CHAINS, pendingIncoming } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
@@ -52,27 +53,13 @@ export function StatusDot({ on, className }: { on: boolean; className?: string }
 export function AppSidebar() {
   const pathname = usePathname()
   const { setOpenMobile } = useSidebar()
-  const { snapshots, live, chains } = useWallet()
+  const { snapshots, live, chains, watchOnly } = useWallet()
   const incoming = pendingIncoming(snapshots).length
 
   return (
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton size="lg" asChild>
-              <Link href="/" onClick={() => setOpenMobile(false)}>
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-gradient-to-br from-orange-400 to-violet-500 text-lg shadow-md">
-                  <span aria-hidden>🦍</span>
-                </div>
-                <div className="grid flex-1 text-left leading-tight">
-                  <span className="truncate font-semibold">Gorilla Wallet</span>
-                  <span className="truncate text-xs text-muted-foreground">{chains.includes("xbt") ? "Bitcoin · Blake2b" : "Bitcoin"}</span>
-                </div>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        <WalletSwitcher />
       </SidebarHeader>
 
       <SidebarContent>
@@ -80,7 +67,15 @@ export function AppSidebar() {
           <SidebarGroupLabel>Wallet</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {NAV.map((item) => (
+              {NAV.map((item) =>
+                item.href === "/send" && watchOnly ? (
+                  <SidebarMenuItem key={item.href}>
+                    <SidebarMenuButton disabled tooltip="Send · not available in watch-only wallets" aria-disabled>
+                      <item.icon />
+                      <span>{item.title}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ) : (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild
@@ -93,7 +88,7 @@ export function AppSidebar() {
                       {item.showsIncoming && incoming > 0 && (
                         <>
                           <IncomingDot className="top-1.5 left-5" />
-                          <span className="ml-auto text-xs font-medium text-emerald-400 group-data-[collapsible=icon]:hidden">
+                          <span className="ml-auto text-xs font-medium text-emerald-600 dark:text-emerald-400 group-data-[collapsible=icon]:hidden">
                             {incoming} incoming
                           </span>
                         </>
@@ -101,7 +96,8 @@ export function AppSidebar() {
                     </Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
-              ))}
+                ),
+              )}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

@@ -1,16 +1,18 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
-import { ExternalLinkIcon, InboxIcon, RocketIcon, ZapIcon } from "lucide-react"
+import { ExternalLinkIcon, InboxIcon, Repeat2Icon, RocketIcon, ZapIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { LabelEditor } from "@/components/label-editor"
+import { ReplayDialog } from "@/components/replay-dialog"
 import { shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
-import { CHAINS, formatCoins, hasData } from "@/lib/wallet"
+import { CHAINS, formatCoins, hasData, type Chain } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 // mempool first, then newest first. Sort by block time: heights aren't comparable across chains.
@@ -18,7 +20,10 @@ const sortKey = (tx: { height: number; time: number | null }) => (tx.height <= 0
 const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
 
 export default function Transactions() {
-  const { snapshots, chains } = useWallet()
+  const { snapshots, chains, watchOnly } = useWallet()
+  // replay needs both chains, so it's part of the Blake2b extension
+  const canReplay = chains.includes("xbt")
+  const [replay, setReplay] = useState<{ chain: Chain; txid: string } | null>(null)
   const loading = !hasData(snapshots.btc) && !hasData(snapshots.xbt)
 
   const rows = chains.flatMap((chain) => {
@@ -35,6 +40,7 @@ export default function Transactions() {
 
   return (
     <Card>
+      <ReplayDialog target={replay} onClose={() => setReplay(null)} />
       <CardHeader>
         <CardTitle>Transactions</CardTitle>
         <CardDescription>Activity across Bitcoin and Blake. Bump a stuck send with RBF, or accelerate a stuck receive with CPFP.</CardDescription>
@@ -94,7 +100,7 @@ export default function Transactions() {
                     <TableCell
                       className={cn(
                         "text-right font-mono text-xs tabular-nums sm:text-sm",
-                        tx.amount > 0 ? "text-emerald-400" : tx.amount < 0 ? "text-rose-400" : "text-muted-foreground",
+                        tx.amount > 0 ? "text-emerald-600 dark:text-emerald-400" : tx.amount < 0 ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground",
                       )}
                     >
                       {tx.amount > 0 && "+"}
@@ -107,26 +113,38 @@ export default function Transactions() {
                       {confs > 0 ? (
                         <span className="font-mono tabular-nums">{confs.toLocaleString()}</span>
                       ) : (
-                        <Badge variant="secondary" className="bg-amber-500/15 text-amber-400">
+                        <Badge variant="secondary" className="bg-amber-500/15 text-amber-600 dark:text-amber-400">
                           Pending
                         </Badge>
                       )}
                     </TableCell>
                     <TableCell className="pr-4 text-right sm:pr-2">
-                      {pending && tx.amount < 0 && (
+                      <div className="flex justify-end gap-1">
+                      {canReplay && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={`Replay on ${CHAINS[tx.chain === "btc" ? "xbt" : "btc"].label}`}
+                          onClick={() => setReplay({ chain: tx.chain, txid: tx.txid })}
+                        >
+                          <Repeat2Icon /> <span className="hidden xl:inline">Replay</span>
+                        </Button>
+                      )}
+                      {pending && tx.amount < 0 && !watchOnly && (
                         <Button asChild size="sm" variant="outline" title="Replace by fee">
                           <Link href={`/send?chain=${tx.chain}&bump=${tx.txid}`}>
                             <ZapIcon /> <span className="hidden sm:inline">Bump</span>
                           </Link>
                         </Button>
                       )}
-                      {pending && tx.amount > 0 && tx.ownCoin && (
+                      {pending && tx.amount > 0 && tx.ownCoin && !watchOnly && (
                         <Button asChild size="sm" variant="outline" title="Child pays for parent">
                           <Link href={`/send?chain=${tx.chain}&cpfp=${tx.txid}:${tx.ownCoin.vout}`}>
                             <RocketIcon /> <span className="hidden sm:inline">CPFP</span>
                           </Link>
                         </Button>
                       )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 )

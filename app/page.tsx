@@ -15,7 +15,7 @@ import { CHAINS, formatCoins, hasData, sumBalances, type Chain } from "@/lib/wal
 import { cn } from "@/lib/utils"
 
 function BalanceCard({ chain }: { chain: Chain }) {
-  const { snapshots, live, flash } = useWallet()
+  const { snapshots, live, flash, watchOnly } = useWallet()
   const s = snapshots[chain]
   const received = flash?.chain === chain ? flash : undefined
   const meta = CHAINS[chain]
@@ -30,7 +30,7 @@ function BalanceCard({ chain }: { chain: Chain }) {
         // keyed by event id so every new payment replays the animation
         <div key={received.id} className="pointer-events-none absolute inset-0 z-10">
           <div className="absolute inset-0 rounded-[inherit] motion-safe:animate-receive-glow" />
-          <span className="absolute top-14 right-6 rounded-full bg-emerald-500/15 px-2.5 py-1 font-mono text-sm font-semibold text-emerald-400 opacity-0 motion-safe:animate-float-up">
+          <span className="absolute top-14 right-6 rounded-full bg-emerald-500/15 px-2.5 py-1 font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400 opacity-0 motion-safe:animate-float-up">
             +{formatCoins(received.amount)} {meta.unit}
           </span>
         </div>
@@ -59,14 +59,14 @@ function BalanceCard({ chain }: { chain: Chain }) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {loaded ? (
+        {loaded && !watchOnly ? (
           <Button asChild variant="outline" size="sm" className="relative z-20">
             <Link href={`/send?chain=${chain}`}>
               <ArrowUpRightIcon /> Send {meta.unit}
             </Link>
           </Button>
         ) : (
-          <Button variant="outline" size="sm" disabled>
+          <Button variant="outline" size="sm" disabled title={watchOnly ? "Watch-only wallet: no keys to send" : undefined}>
             <ArrowUpRightIcon /> Send {meta.unit}
           </Button>
         )}
@@ -74,7 +74,7 @@ function BalanceCard({ chain }: { chain: Chain }) {
       <CardFooter className="flex justify-between text-sm text-muted-foreground">
         <span>
           Pending:{" "}
-          <span className={cn("font-mono tabular-nums", unconfirmed > 0 && "text-emerald-400", unconfirmed < 0 && "text-rose-400")}>
+          <span className={cn("font-mono tabular-nums", unconfirmed > 0 && "text-emerald-600 dark:text-emerald-400", unconfirmed < 0 && "text-rose-600 dark:text-rose-400")}>
             {unconfirmed > 0 && "+"}
             {loaded ? formatCoins(unconfirmed) : "—"}
           </span>

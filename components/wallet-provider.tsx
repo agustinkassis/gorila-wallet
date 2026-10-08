@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useEffect, useRef, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import { useRouter } from "next/navigation"
 import { nip98 } from "nostr-tools"
 import { toast } from "sonner"
@@ -18,59 +18,100 @@ import {
   type Snapshot,
   type StreamMessage,
   type TxEvent,
+  type WalletInfo,
 } from "@/lib/wallet"
 
-type WalletState = {
+type ChainSnapshots = Partial<Record<Chain, Snapshot>>
+type StreamState = {
+  /** null until the server sent the list */
+  wallets: WalletInfo[] | null
+  /** walletId → chain → snapshot */
+  all: Record<string, ChainSnapshots>
+  settings: Settings
+  /** true while the SSE stream is open */
+  live: boolean
+  error?: string
+  /** last incoming payment, drives the balance-card animation (id changes per event) */
+  flash?: { id: string; walletId: string; chain: Chain; amount: number }
+}
+
+const EMPTY: StreamState = { wallets: null, all: {}, settings: DEFAULT_SETTINGS, live: false }
+/** Chains the user has on: Bitcoin is core, Blake (XBT) comes with the Blake2b extension. */
+export const enabledChains = (s: Settings): Chain[] => (s.blake ? ["btc", "xbt"] : ["btc"])
+
+// Selected wallet lives in localStorage (per browser), shared across tabs like the login.
+const SELECTED_KEY = "gorilla-wallet:wallet"
+const subscribeSelected = (cb: () => void) => (window.addEventListener("storage", cb), () => window.removeEventListener("storage", cb))
+const readSelected = () => localStorage.getItem(SELECTED_KEY)
+
+type WalletContext = {
+  /** the wallet list has arrived (an empty list means: show the create/import flow) */
+  ready: boolean
+  wallets: WalletInfo[]
+  /** the selected wallet */
+  wallet?: WalletInfo
+  selectWallet: (id: string) => void
+  watchOnly: boolean
   xpub?: string
   path?: string
   /** master key fingerprint, for PSBT bip32Derivation */
   fingerprint?: number
   /** first receive addresses, derived in the browser from the xpub */
   addresses: string[]
+  /** the selected wallet's snapshots, enabled chains only */
+  snapshots: ChainSnapshots
+  /** every wallet's snapshots (wallet switcher balances) */
+  allSnapshots: Record<string, ChainSnapshots>
+  chains: Chain[]
   settings: Settings
-  snapshots: Partial<Record<Chain, Snapshot>>
-  /** true while the SSE stream is open */
   live: boolean
   error?: string
-  /** last incoming payment, drives the balance-card animation (id changes per event) */
-  flash?: { id: string; chain: Chain; amount: number }
+  flash?: StreamState["flash"]
+  retry: () => void
 }
 
-const EMPTY: WalletState = { addresses: [], snapshots: {}, live: false, settings: DEFAULT_SETTINGS }
-/** Chains the user has on: Bitcoin is core, Blake (XBT) comes with the Blake2b extension. */
-export const enabledChains = (s: Settings): Chain[] => (s.blake ? ["btc", "xbt"] : ["btc"])
-
-const Ctx = createContext<(WalletState & { chains: Chain[]; retry: () => void }) | null>(null)
+const Ctx = createContext<WalletContext | null>(null)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 class Fatal extends Error {}
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const { pubkey } = useNostr()
-  const [state, setState] = useState<WalletState & { owner?: string }>(EMPTY)
+  const [state, setState] = useState<StreamState & { owner?: string }>(EMPTY)
   const [attempt, setAttempt] = useState(0)
   const router = useRouter()
-  // Latest snapshot per chain, read outside setState so notifications fire exactly once per event.
-  const latest = useRef<Partial<Record<Chain, Snapshot>>>({})
+  // Latest loaded snapshot per wallet+chain, read outside setState so notifications fire exactly once per event.
+  const latest = useRef<Record<string, Snapshot>>({})
   const settings = useRef(DEFAULT_SETTINGS)
+  const walletNames = useRef<WalletInfo[]>([])
 
   useEffect(() => {
     if (!pubkey) return
     const ac = new AbortController()
     latest.current = {}
-    const set = (patch: Partial<WalletState> | ((s: WalletState) => Partial<WalletState>)) =>
+    const set = (patch: Partial<StreamState> | ((s: StreamState) => Partial<StreamState>)) =>
       !ac.signal.aborted && setState((s) => ({ ...s, owner: pubkey, ...(typeof patch === "function" ? patch(s) : patch) }))
 
-    const notify = ({ kind, chain, tx }: TxEvent) => {
+    const notify = (walletId: string, { kind, chain, tx }: TxEvent) => {
+      const many = walletNames.current.length > 1
+      const name = walletNames.current.find((w) => w.id === walletId)?.name
       const amount = `+${formatCoins(tx.amount)} ${CHAINS[chain].unit}`
       const confirmed = tx.height > 0
-      const title = kind === "confirmed" ? `${CHAINS[chain].label} payment confirmed` : `${CHAINS[chain].label} payment received`
+      const what = kind === "confirmed" ? `${CHAINS[chain].label} payment confirmed` : `${CHAINS[chain].label} payment received`
+      const title = many && name ? `${name}: ${what}` : what
       const body = kind === "confirmed" || !confirmed ? `${amount} · ${confirmed ? "1 confirmation" : "pending confirmation"}` : `${amount} · confirmed`
-      const view = { label: "View", onClick: () => router.push("/transactions") }
+      const view = {
+        label: "View",
+        onClick: () => {
+          localStorage.setItem(SELECTED_KEY, walletId)
+          window.dispatchEvent(new StorageEvent("storage"))
+          router.push("/transactions")
+        },
+      }
       if (kind === "received") {
         toast.success(title, { description: body, action: view })
         if (settings.current.sound) playChime()
-        set({ flash: { id: `${chain}:${tx.txid}`, chain, amount: tx.amount } })
+        set({ flash: { id: `${walletId}:${chain}:${tx.txid}`, walletId, chain, amount: tx.amount } })
       } else {
         toast.info(title, { description: body, action: view })
       }
@@ -78,18 +119,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     }
 
     const onMessage = (msg: StreamMessage) => {
-      if (msg.type === "init")
-        return set({ xpub: msg.xpub, path: msg.path, fingerprint: msg.fingerprint, addresses: deriveAddresses(msg.xpub) })
+      if (msg.type === "wallets") {
+        walletNames.current = msg.wallets
+        const ids = new Set(msg.wallets.map((w) => w.id))
+        return set((s) => ({ wallets: msg.wallets, all: Object.fromEntries(Object.entries(s.all).filter(([id]) => ids.has(id))) }))
+      }
       if (msg.type === "settings") {
         settings.current = msg.settings
         return set({ settings: msg.settings })
       }
-      const { chain } = msg.snapshot
-      const events = txEvents(latest.current[chain], msg.snapshot)
+      const { walletId, chain } = msg.snapshot
+      const key = `${walletId}:${chain}`
+      const events = txEvents(latest.current[key], msg.snapshot)
       // Keep the last loaded view as baseline (a restarted server first sends an empty snapshot).
-      if (hasData(msg.snapshot)) latest.current[chain] = msg.snapshot
-      set((s) => ({ snapshots: { ...s.snapshots, [chain]: msg.snapshot } }))
-      events.forEach(notify)
+      if (hasData(msg.snapshot)) latest.current[key] = msg.snapshot
+      set((s) => ({ all: { ...s.all, [walletId]: { ...s.all[walletId], [chain]: msg.snapshot } } }))
+      events.forEach((e) => notify(walletId, e))
     }
 
     ;(async () => {
@@ -104,7 +149,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
             throw new Fatal("Couldn't sign the login request. Unlock your Nostr extension and retry.")
           }
           const res = await fetch(url, { headers: { Authorization: auth }, signal: ac.signal })
-          if (res.status === 403) throw new Fatal("This Nostr account is not authorized to view this wallet.")
+          if (res.status === 403) throw new Fatal("This Nostr account is not authorized to open this wallet.")
           if (res.status === 401) throw new Fatal("Nostr authentication failed. Check your system clock and retry.")
           if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
 
@@ -140,12 +185,44 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     return () => ac.abort()
   }, [pubkey, attempt, router])
 
+  const selectedId = useSyncExternalStore(subscribeSelected, readSelected, () => null)
+  const selectWallet = useCallback((id: string) => {
+    localStorage.setItem(SELECTED_KEY, id)
+    window.dispatchEvent(new StorageEvent("storage"))
+  }, [])
+
   const value = state.owner === pubkey ? state : EMPTY
+  const wallets = value.wallets ?? []
+  const wallet = wallets.find((w) => w.id === selectedId) ?? wallets[0]
   const chains = enabledChains(value.settings)
   // a disabled extension's chain disappears everywhere at once, even before the server drops it
-  const snapshots = Object.fromEntries(Object.entries(value.snapshots).filter(([c]) => chains.includes(c as Chain)))
+  const snapshots = Object.fromEntries(Object.entries(wallet ? (value.all[wallet.id] ?? {}) : {}).filter(([c]) => chains.includes(c as Chain)))
+  const addresses = useMemo(() => (wallet ? deriveAddresses(wallet.xpub) : []), [wallet])
+
   return (
-    <Ctx.Provider value={{ ...value, snapshots, chains, retry: () => (setState(EMPTY), setAttempt((a) => a + 1)) }}>{children}</Ctx.Provider>
+    <Ctx.Provider
+      value={{
+        ready: value.wallets !== null,
+        wallets,
+        wallet,
+        selectWallet,
+        watchOnly: !!wallet?.watchOnly,
+        xpub: wallet?.xpub,
+        path: wallet?.path,
+        fingerprint: wallet?.fingerprint,
+        addresses,
+        snapshots,
+        allSnapshots: value.all,
+        chains,
+        settings: value.settings,
+        live: value.live,
+        error: value.error,
+        flash: value.flash && value.flash.walletId === wallet?.id ? value.flash : undefined,
+        retry: () => (setState(EMPTY), setAttempt((a) => a + 1)),
+      }}
+    >
+      {children}
+    </Ctx.Provider>
   )
 }
 

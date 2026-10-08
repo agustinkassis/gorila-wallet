@@ -67,7 +67,7 @@ export default function ReceivePage() {
             </Button>
           </div>
           {(usedAnywhere.has(current.address) || current.change === 1) && (
-            <p className="flex items-start gap-1.5 text-xs text-amber-400">
+            <p className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
               <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
               {current.change === 1
                 ? "Change address: meant for this wallet's own change. Prefer a receive address for incoming payments."

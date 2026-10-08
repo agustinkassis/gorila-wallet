@@ -2,7 +2,8 @@
 
 import { usePathname } from "next/navigation"
 import { nip19 } from "nostr-tools"
-import { BellIcon, CopyIcon, LogOutIcon, ZapIcon } from "lucide-react"
+import { useTheme } from "next-themes"
+import { BellIcon, CopyIcon, LogOutIcon, MonitorIcon, MoonIcon, SunIcon, ZapIcon } from "lucide-react"
 import { toast } from "sonner"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -12,6 +13,8 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { SidebarTrigger } from "@/components/ui/sidebar"
@@ -19,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { IncomingDot, NAV } from "@/components/app-sidebar"
 import { useNostr } from "@/components/nostr-provider"
 import { useWallet } from "@/components/wallet-provider"
+import { WatchOnlyBadge } from "@/components/wallet-switcher"
 import { canNotify, requestNotifications } from "@/lib/notify"
 import { pendingIncoming } from "@/lib/wallet"
 
@@ -31,7 +35,7 @@ export function copy(text: string, label = "Copied") {
 export function SiteHeader() {
   const pathname = usePathname()
   const { pubkey, profile, login, logout } = useNostr()
-  const { snapshots } = useWallet()
+  const { snapshots, watchOnly } = useWallet()
   const incoming = pendingIncoming(snapshots).length > 0
   const title = NAV.find((n) => n.href === pathname)?.title ?? "Gorilla Wallet"
   const npub = pubkey ? nip19.npubEncode(pubkey) : ""
@@ -44,8 +48,10 @@ export function SiteHeader() {
         {incoming && <IncomingDot className="top-1 right-1 md:hidden" />}
       </div>
       <h1 className="text-sm font-medium">{title}</h1>
+      {watchOnly && <WatchOnlyBadge className="hidden sm:inline-flex" />}
 
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-1">
+        <ThemeToggle />
         {pubkey === undefined ? (
           <Skeleton className="size-8 rounded-full" />
         ) : pubkey ? (
@@ -85,5 +91,33 @@ export function SiteHeader() {
         )}
       </div>
     </header>
+  )
+}
+
+/** Light / Dark / System. The icon swaps via CSS so server and client render the same markup. */
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme()
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label="Theme">
+          <SunIcon className="dark:hidden" />
+          <MoonIcon className="hidden dark:block" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup value={theme} onValueChange={setTheme}>
+          <DropdownMenuRadioItem value="light">
+            <SunIcon /> Light
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="dark">
+            <MoonIcon /> Dark
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="system">
+            <MonitorIcon /> System
+          </DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
