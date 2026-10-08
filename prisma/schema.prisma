@@ -1,4 +1,4 @@
-// Local wallet cache + user metadata. Chain-scoped rows use chain = "btc" | "xbt".
+// Local wallet cache + user metadata. Chain-scoped rows use the chain ids of lib/chains.ts ("btc", "xbt", "tbtc4", …).
 // Values are satoshis (BigInt). Electrum stays the source of truth; this is a warm, indexed cache.
 
 generator client {
@@ -16,10 +16,7 @@ model Wallet {
   id          String   @id
   name        String
   kind        String // env | seed | watch
-  xpub        String
-  path        String
-  fingerprint Int
-  /// seed wallets: scrypt + AES-256-GCM sealed JSON {mnemonic, passphrase}
+  /// seed wallets: JSON {mnemonic, passphrase} sealed with the wallet password (scrypt + AES-256-GCM), or kdf "none" without one
   encSeed     String?
   /// a BIP39 passphrase is part of this wallet (shown in the UI, never stored in clear)
   passphrase  Boolean  @default(false)
@@ -32,9 +29,21 @@ model Account {
   createdAt DateTime @default(now())
 }
 
-/// Addresses derived from a wallet's account xpub (identical on both chains).
+/// A wallet's account key per family of chains (main: coin type 0', test: 1'). xpub stored with mainnet version bytes.
+model WalletAccount {
+  walletId    String
+  family      String // main | test
+  xpub        String
+  path        String
+  fingerprint Int
+
+  @@id([walletId, family])
+}
+
+/// Addresses derived from a wallet's account on a family (shared by that family's chains, e.g. Bitcoin and Blake).
 model Address {
   walletId   String
+  family     String @default("main")
   address    String
   change     Int // 0 = receive, 1 = change
   index      Int
@@ -42,7 +51,7 @@ model Address {
 
   @@id([walletId, address])
   @@unique([walletId, scripthash])
-  @@unique([walletId, change, index])
+  @@unique([walletId, family, change, index])
 }
 
 /// Per-chain sync state of an address. `status` is the Electrum status hash: unchanged => skip resync.

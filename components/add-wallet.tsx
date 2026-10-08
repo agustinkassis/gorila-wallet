@@ -13,12 +13,13 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { useWallet } from "@/components/wallet-provider"
 import { api } from "@/lib/api"
-import { DERIVATION_PATH, normalizeXpub, type WalletInfo } from "@/lib/wallet"
+import { DERIVATION_PATH, FAMILIES, normalizeXpub, type Family, type WalletInfo } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 type Mode = "choose" | "create" | "words" | "xpub"
 const WORDS = new Set(wordlist)
-const DEFAULT_PATH = "m/84'/0'/0'"
+/** BIP84 account 0 per family: coin type 0' on mainnet, 1' on testnets and signet */
+const DEFAULT_PATHS: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'" }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -51,24 +52,29 @@ function SecurityFields({ value, onChange }: { value: Security; onChange: (s: Se
       <Field label="Derivation path" hint="Native SegWit (BIP84). Change only to match another wallet.">
         <Input className="font-mono text-xs" value={value.path} onChange={(e) => set({ path: e.target.value })} />
       </Field>
-      <Field label="Wallet password" hint="Encrypts the recovery words on the server. You'll enter it to sign. At least 8 characters.">
+      <Field label="Wallet password (optional)" hint="Encrypts the recovery words on the server. You'll enter it to sign. At least 8 characters.">
         <div className="grid gap-3 sm:grid-cols-2">
           <Input type="password" placeholder="Password" value={value.password} onChange={(e) => set({ password: e.target.value })} />
           <Input type="password" placeholder="Repeat password" value={value.password2} onChange={(e) => set({ password2: e.target.value })} />
         </div>
+        {!value.password && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            Without a password the recovery words are stored unencrypted: anyone who gets the database can spend.
+          </p>
+        )}
       </Field>
     </div>
   )
 }
 
 type Security = { usePassphrase: boolean; passphrase: string; passphrase2: string; path: string; password: string; password2: string }
-const NEW_SECURITY: Security = { usePassphrase: false, passphrase: "", passphrase2: "", path: DEFAULT_PATH, password: "", password2: "" }
+const NEW_SECURITY: Security = { usePassphrase: false, passphrase: "", passphrase2: "", path: DEFAULT_PATHS.main, password: "", password2: "" }
 
 function securityError(s: Security) {
   if (s.usePassphrase && !s.passphrase) return "Enter the passphrase, or turn it off"
   if (s.usePassphrase && s.passphrase !== s.passphrase2) return "Passphrases don't match"
   if (!DERIVATION_PATH.test(s.path.trim())) return "Invalid derivation path"
-  if (s.password.length < 8) return "Wallet password must be at least 8 characters"
+  if (s.password && s.password.length < 8) return "Wallet password must be at least 8 characters, or none"
   if (s.password !== s.password2) return "Passwords don't match"
   return null
 }
@@ -88,9 +94,11 @@ export function AddWalletFlow({ onDone, onCancel }: { onDone: (w: WalletInfo) =>
   const [words, setWords] = useState("")
   // xpub
   const [xpub, setXpub] = useState("")
-  const [xpubPath, setXpubPath] = useState(DEFAULT_PATH)
+  const [xpubPath, setXpubPath] = useState("")
   const [fingerprint, setFingerprint] = useState("")
-  const [security, setSecurity] = useState(NEW_SECURITY)
+  // the account path is for the selected network's family; the other families follow its coin type
+  const { family } = useWallet()
+  const [security, setSecurity] = useState(() => ({ ...NEW_SECURITY, path: DEFAULT_PATHS[family] }))
 
   const genWords = generated.split(" ")
   // three positions to confirm the backup, fixed per generated phrase
@@ -106,8 +114,9 @@ export function AddWalletFlow({ onDone, onCancel }: { onDone: (w: WalletInfo) =>
   const unknown = typed.filter((w) => !WORDS.has(w))
   const wordsValid = validateMnemonic(typed.join(" "), wordlist)
   let xpubError: string | null = null
+  let xpubFamily: Family | undefined
   try {
-    if (xpub.trim()) normalizeXpub(xpub)
+    if (xpub.trim()) xpubFamily = normalizeXpub(xpub).family
   } catch (e) {
     xpubError = (e as Error).message
   }
@@ -131,6 +140,7 @@ export function AddWalletFlow({ onDone, onCancel }: { onDone: (w: WalletInfo) =>
     passphrase: security.usePassphrase ? security.passphrase : "",
     path: security.path.trim(),
     password: security.password,
+    family,
   })
 
   const back = () => {
@@ -150,7 +160,7 @@ export function AddWalletFlow({ onDone, onCancel }: { onDone: (w: WalletInfo) =>
           [
             { mode: "create", icon: SparklesIcon, title: "Create a new wallet", desc: "Generate new recovery words, with an optional passphrase." },
             { mode: "words", icon: KeyRoundIcon, title: "Import recovery words", desc: "Restore from the 12 or 24 BIP39 words you already have." },
-            { mode: "xpub", icon: EyeIcon, title: "Watch-only (xpub)", desc: "Track balances from an xpub or zpub. No keys: sending is disabled." },
+            { mode: "xpub", icon: EyeIcon, title: "Watch-only (xpub)", desc: "Track balances from an xpub/zpub or a testnet tpub/vpub. No keys: sending is disabled." },
           ] as const
         ).map((o) => (
           <button
@@ -291,12 +301,23 @@ export function AddWalletFlow({ onDone, onCancel }: { onDone: (w: WalletInfo) =>
       {mode === "xpub" && (
         <>
           {nameField}
-          <Field label="Account xpub or zpub" hint={xpubError ?? (xpub.trim() ? "Valid extended public key" : "Native SegWit account key, e.g. from Sparrow or a hardware wallet.")}>
+          <Field
+            label="Account xpub / zpub (mainnet) or tpub / vpub (testnets)"
+            hint={
+              xpubError ??
+              (xpubFamily ? `Valid ${FAMILIES[xpubFamily].label} key` : "Native SegWit account key, e.g. from Sparrow or a hardware wallet.")
+            }
+          >
             <Textarea rows={3} spellCheck={false} className="font-mono text-xs" value={xpub} onChange={(e) => setXpub(e.target.value)} />
           </Field>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Derivation path">
-              <Input className="font-mono text-xs" value={xpubPath} onChange={(e) => setXpubPath(e.target.value)} />
+              <Input
+                className="font-mono text-xs"
+                placeholder={DEFAULT_PATHS[xpubFamily ?? family]}
+                value={xpubPath}
+                onChange={(e) => setXpubPath(e.target.value)}
+              />
             </Field>
             <Field label="Master fingerprint (optional)">
               <Input className="font-mono text-xs" placeholder="e.g. 73c5da0a" value={fingerprint} onChange={(e) => setFingerprint(e.target.value)} />

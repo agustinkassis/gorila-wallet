@@ -53,8 +53,8 @@ export function StatusDot({ on, className }: { on: boolean; className?: string }
 export function AppSidebar() {
   const pathname = usePathname()
   const { setOpenMobile } = useSidebar()
-  const { snapshots, live, chains, watchOnly } = useWallet()
-  const incoming = pendingIncoming(snapshots).length
+  const { snapshots, live, chains, chain: active, watchOnly } = useWallet()
+  const incoming = pendingIncoming({ [active]: snapshots[active] }).length
 
   return (
     <Sidebar collapsible="icon" variant="inset">

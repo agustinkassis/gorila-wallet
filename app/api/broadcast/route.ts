@@ -1,11 +1,12 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
 import { broadcastHex } from "@/lib/server/broadcast"
-import { ExtensionDisabledError, chainFor, parseTx } from "@/lib/server/watcher"
+import { CHAINS } from "@/lib/chains"
+import { ChainInactiveError, chainFor, parseTx } from "@/lib/server/watcher"
 import { SIGHASH_UNIFIED } from "@/lib/unified-sighash"
 
 /**
- * POST {chain, hex} → {txid}. Sent only to that chain's own mempool instance (Electrum fallback),
- * and a Blake tx must be fully SIGHASH_UNIFIED-signed so it can't be replayed onto Bitcoin.
+ * POST {chain, hex} → {txid}. Sent only to that chain's own mempool sources (Electrum fallback). On a SIGHASH_UNIFIED
+ * chain (Blake) every signature must use it, so the tx can't be replayed elsewhere; on others none may.
  */
 export async function POST(req: Request) {
   const body = await authorizedJson<{ chain?: unknown; hex?: unknown }>(req)
@@ -22,15 +23,16 @@ export async function POST(req: Request) {
   for (let i = 0; i < tx.inputsLength; i++) {
     const sig = tx.getInput(i).finalScriptWitness?.[0]
     const unified = !!sig && (sig[sig.length - 1] & SIGHASH_UNIFIED) !== 0
-    if (body.chain === "xbt" && !unified) return Response.json({ error: "Blake transactions must be SIGHASH_UNIFIED-signed (replay protection)" }, { status: 422 })
-    if (body.chain === "btc" && unified) return Response.json({ error: "This is a Blake-signed transaction" }, { status: 422 })
+    const { label, unifiedSighash } = CHAINS[body.chain]
+    if (unifiedSighash && !unified) return Response.json({ error: `${label} transactions must be SIGHASH_UNIFIED-signed (replay protection)` }, { status: 422 })
+    if (!unifiedSighash && unified) return Response.json({ error: `This transaction is SIGHASH_UNIFIED-signed: ${label} rejects it` }, { status: 422 })
   }
 
   let watcher
   try {
     watcher = await chainFor(body.chain)
   } catch (e) {
-    if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
+    if (e instanceof ChainInactiveError) return Response.json({ error: e.message }, { status: 409 })
     throw e
   }
   try {

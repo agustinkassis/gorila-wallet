@@ -10,7 +10,8 @@ import { shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
 import { api } from "@/lib/api"
 import type { ReplayAnalysis, Status } from "@/lib/server/replay"
-import { CHAINS, formatCoins, type Chain } from "@/lib/wallet"
+import { useUnit } from "@/components/units"
+import { CHAINS, formatAmount, type Chain } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 const TONE: Record<Status, { box: string; edge: string; text: string; icon: typeof CheckCircle2Icon }> = {
@@ -26,6 +27,7 @@ const ICON_TEXT: Record<Status, string> = {
 
 /** Inputs → transaction → outputs, each node colored by whether it holds up on the target chain. */
 function ReplayGraph({ a }: { a: ReplayAnalysis }) {
+  const unit = useUnit()
   const ROW = 58
   const NODE_H = 46
   const rows = Math.max(a.inputs.length, a.outputs.length, 1)
@@ -60,7 +62,7 @@ function ReplayGraph({ a }: { a: ReplayAnalysis }) {
               <rect x={inX} y={y} width={nodeW} height={NODE_H} rx={8} className={cn("stroke-[1.5]", TONE[inp.status].box)} />
               <text x={inX + 10} y={y + 18} className="fill-foreground font-mono text-[11px]">
                 {shorten(inp.txid, 6)}:{inp.vout}
-                {inp.value !== null && <tspan className="fill-muted-foreground"> · {formatCoins(inp.value)}</tspan>}
+                {inp.value !== null && <tspan className="fill-muted-foreground"> · {formatAmount(inp.value, unit)}</tspan>}
               </text>
               <text x={inX + 10} y={y + 35} className={cn("text-[10.5px]", TONE[inp.status].text)}>
                 {inp.note}
@@ -89,7 +91,7 @@ function ReplayGraph({ a }: { a: ReplayAnalysis }) {
               <rect x={outX} y={y} width={nodeW} height={NODE_H} rx={8} className={cn("stroke-[1.5]", TONE[out.status].box)} />
               <text x={outX + 10} y={y + 18} className="fill-foreground font-mono text-[11px]">
                 {out.data ? `OP_RETURN · ${out.scriptSize} B` : shorten(out.address ?? "unknown script", 7)}
-                {!out.data && <tspan className="fill-muted-foreground"> · {formatCoins(out.amount)}</tspan>}
+                {!out.data && <tspan className="fill-muted-foreground"> · {formatAmount(out.amount, unit)}</tspan>}
               </text>
               <text x={outX + 10} y={y + 35} className={cn("text-[10.5px]", TONE[out.status].text)}>
                 {out.note}
@@ -125,7 +127,7 @@ export function ReplayDialog({ target, onClose }: { target: { chain: Chain; txid
   }, [target, wallet?.id])
 
   const from = target?.chain ?? "btc"
-  const to: Chain = from === "btc" ? "xbt" : "btc"
+  const to: Chain = CHAINS[from].replayPair ?? from
   const explorer = snapshots[to]?.explorer
 
   const replay = async () => {

@@ -1,20 +1,51 @@
 "use client"
 
-import { createContext, useCallback, useContext, useEffect, useState, useSyncExternalStore } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { SimplePool, type Event, type EventTemplate } from "nostr-tools"
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure"
+import { hexToBytes } from "nostr-tools/utils"
 import { toast } from "sonner"
 import { requestNotifications } from "@/lib/notify"
 
 declare global {
   interface Window {
     nostr?: { getPublicKey(): Promise<string>; signEvent(e: EventTemplate): Promise<Event> }
+    /** device key injected by the desktop app (src-tauri), for its own origin only */
+    __NOSTR_SECRET__?: string
   }
+}
+
+// Desktop app: webviews have no NIP-07 extensions, so its device key becomes a built-in signer.
+if (typeof window !== "undefined" && window.__NOSTR_SECRET__ && !window.nostr) {
+  const sk = hexToBytes(window.__NOSTR_SECRET__)
+  window.nostr = { getPublicKey: async () => getPublicKey(sk), signEvent: async (e) => finalizeEvent(e, sk) }
 }
 
 export type Profile = { name?: string; display_name?: string; picture?: string }
 
 const STORAGE_KEY = "gorilla-wallet:pubkey"
-const RELAYS = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"]
+const RELAYS = ["wss://purplepag.es", "wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"]
+
+// Profile cache (localStorage, per pubkey): the navbar shows it instantly; relays refresh it in the background.
+type CachedProfile = { createdAt: number; data: Profile }
+const profileKey = (pubkey: string) => `gorilla-wallet:profile:${pubkey}`
+function readProfile(pubkey: string): CachedProfile | null {
+  try {
+    return JSON.parse(localStorage.getItem(profileKey(pubkey)) ?? "null")
+  } catch {
+    return null
+  }
+}
+/** Only the fields we show, as strings (kind-0 content is untrusted JSON). */
+function pickProfile(content: string): Profile | null {
+  try {
+    const p = JSON.parse(content) as Record<string, unknown>
+    const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined)
+    return { name: str(p.name), display_name: str(p.display_name) ?? str(p.displayName), picture: str(p.picture) }
+  } catch {
+    return null
+  }
+}
 
 // localStorage as an external store: no hydration mismatch, and logout in one tab logs out the others.
 const subscribe = (cb: () => void) => (window.addEventListener("storage", cb), () => window.removeEventListener("storage", cb))
@@ -44,17 +75,26 @@ const Ctx = createContext<NostrContext | null>(null)
 
 export function NostrProvider({ children }: { children: React.ReactNode }) {
   const pubkey = useSyncExternalStore(subscribe, readPubkey, () => undefined)
-  const [profile, setProfile] = useState<{ pubkey: string; data: Profile } | null>(null)
+  const [fetched, setFetched] = useState<{ pubkey: string; data: Profile } | null>(null)
+  const cached = useMemo(() => (pubkey ? readProfile(pubkey) : null), [pubkey])
 
   useEffect(() => {
     if (!pubkey) return
     const pool = new SimplePool()
+    // every relay's answer, newest kind 0 wins (pool.get would take whichever relay answers first)
     pool
-      .get(RELAYS, { kinds: [0], authors: [pubkey] })
-      .then((e) => e && setProfile({ pubkey, data: JSON.parse(e.content) }))
+      .querySync(RELAYS, { kinds: [0], authors: [pubkey] }, { maxWait: 5000 })
+      .then((events) => {
+        const e = events.sort((a, b) => b.created_at - a.created_at)[0]
+        const data = e && pickProfile(e.content)
+        if (!data || (readProfile(pubkey)?.createdAt ?? 0) > e.created_at) return
+        localStorage.setItem(profileKey(pubkey), JSON.stringify({ createdAt: e.created_at, data } satisfies CachedProfile))
+        setFetched({ pubkey, data })
+      })
       .catch(() => {})
     return () => pool.close(RELAYS)
   }, [pubkey])
+  const profile = (fetched && fetched.pubkey === pubkey ? fetched.data : null) ?? cached?.data ?? null
 
   const login = useCallback(async () => {
     try {
@@ -68,8 +108,13 @@ export function NostrProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => writePubkey(null), [])
 
+  // Desktop app: sign in with the device key right away.
+  useEffect(() => {
+    if (window.__NOSTR_SECRET__ && !readPubkey()) void login()
+  }, [login])
+
   return (
-    <Ctx.Provider value={{ pubkey, profile: profile && profile.pubkey === pubkey ? profile.data : null, login, logout }}>
+    <Ctx.Provider value={{ pubkey, profile, login, logout }}>
       {children}
     </Ctx.Provider>
   )

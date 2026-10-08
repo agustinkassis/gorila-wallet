@@ -12,7 +12,8 @@ import { LabelEditor } from "@/components/label-editor"
 import { ReplayDialog } from "@/components/replay-dialog"
 import { shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
-import { CHAINS, formatCoins, hasData, type Chain } from "@/lib/wallet"
+import { useUnit } from "@/components/units"
+import { CHAINS, formatAmount, hasData, type Chain } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 // mempool first, then newest first. Sort by block time: heights aren't comparable across chains.
@@ -20,9 +21,10 @@ const sortKey = (tx: { height: number; time: number | null }) => (tx.height <= 0
 const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
 
 export default function Transactions() {
-  const { snapshots, chains, watchOnly } = useWallet()
-  // replay needs both chains, so it's part of the Blake2b extension
-  const canReplay = chains.includes("xbt")
+  const unit = useUnit()
+  const { snapshots, chains, pair, watchOnly } = useWallet()
+  // replay needs the chain's pair synced alongside (Bitcoin ↔ Blake)
+  const canReplay = !!pair
   const [replay, setReplay] = useState<{ chain: Chain; txid: string } | null>(null)
   const loading = !hasData(snapshots.btc) && !hasData(snapshots.xbt)
 
@@ -104,7 +106,7 @@ export default function Transactions() {
                       )}
                     >
                       {tx.amount > 0 && "+"}
-                      {formatCoins(tx.amount)}
+                      {formatAmount(tx.amount, unit)}
                     </TableCell>
                     <TableCell className="hidden text-right font-mono text-xs text-muted-foreground lg:table-cell">
                       {tx.fee != null && tx.vsize ? `${tx.fee.toLocaleString()} · ${(tx.fee / tx.vsize).toFixed(1)}/vB` : "—"}

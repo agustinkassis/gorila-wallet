@@ -18,8 +18,12 @@ const kdf = (password: string, salt: Buffer) =>
     scrypt(password.normalize("NFKC"), salt, 32, { N, r, p, maxmem: MAXMEM }, (err, key) => (err ? reject(err) : resolve(key))),
   )
 
-/** Encrypt with a password: scrypt-derived key, AES-256-GCM. Returns a self-describing JSON string. */
+/**
+ * Encrypt with a password: scrypt-derived key, AES-256-GCM. Returns a self-describing JSON string.
+ * Without a password nothing is encrypted (`kdf: "none"`): anyone who can read the database can read it.
+ */
 export async function seal(plaintext: string, password: string) {
+  if (!password) return JSON.stringify({ v: 1, kdf: "none", pt: plaintext })
   const salt = randomBytes(16)
   const iv = randomBytes(12)
   const cipher = createCipheriv("aes-256-gcm", await kdf(password, salt), iv)
@@ -28,9 +32,13 @@ export async function seal(plaintext: string, password: string) {
   return JSON.stringify({ v: 1, kdf: "scrypt", N, r, p, salt: b64(salt), iv: b64(iv), tag: b64(cipher.getAuthTag()), ct: b64(ct) })
 }
 
+/** Sealed with a password (vs. stored without one). */
+export const isLocked = (sealed: string) => (JSON.parse(sealed) as { kdf: string }).kdf !== "none"
+
 /** Decrypt; a wrong password (or tampered data) fails GCM authentication → WrongPasswordError. */
 export async function unseal(sealed: string, password: string) {
-  const s = JSON.parse(sealed) as { salt: string; iv: string; tag: string; ct: string }
+  const s = JSON.parse(sealed) as { kdf: string; pt: string; salt: string; iv: string; tag: string; ct: string }
+  if (s.kdf === "none") return s.pt
   const buf = (v: string) => Buffer.from(v, "base64")
   const decipher = createDecipheriv("aes-256-gcm", await kdf(password, buf(s.salt)), buf(s.iv))
   decipher.setAuthTag(buf(s.tag))

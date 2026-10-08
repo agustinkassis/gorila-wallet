@@ -14,7 +14,8 @@ import {
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from "@/components/ui/sidebar"
 import { AddWalletDialog } from "@/components/add-wallet"
 import { useWallet } from "@/components/wallet-provider"
-import { formatCoins, sumBalances, type WalletKind } from "@/lib/wallet"
+import { UnitLabel, useUnit } from "@/components/units"
+import { CHAINS, FAMILIES, formatAmount, sumBalances, type WalletKind } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 export const KIND: Record<WalletKind, { label: string; icon: typeof KeyRoundIcon }> = {
@@ -34,10 +35,11 @@ export function WatchOnlyBadge({ className }: { className?: string }) {
 
 /** Sidebar header: the selected wallet, a dropdown to switch between wallets, and "Add wallet". */
 export function WalletSwitcher() {
-  const { wallets, wallet, selectWallet, allSnapshots, chains } = useWallet()
+  const { wallets, wallet, selectWallet, allSnapshots, chain, family } = useWallet()
+  const unit = useUnit()
   const { isMobile, setOpenMobile } = useSidebar()
   const [adding, setAdding] = useState(false)
-  const btc = (id: string) => sumBalances(allSnapshots[id]?.btc)
+  const balance = (id: string) => sumBalances(allSnapshots[id]?.[chain])
 
   return (
     <SidebarMenu>
@@ -52,7 +54,7 @@ export function WalletSwitcher() {
                 <span className="truncate font-semibold">{wallet?.name ?? "Gorilla Wallet"}</span>
                 <span className="truncate text-xs text-muted-foreground">
                   {wallet ? (wallet.watchOnly ? "Watch-only" : KIND[wallet.kind].label) : "No wallet yet"}
-                  {chains.includes("xbt") ? " · Blake2b" : ""}
+                  {` · ${CHAINS[chain].label}`}
                 </span>
               </div>
               <ChevronsUpDownIcon className="ml-auto size-4 text-muted-foreground" />
@@ -62,7 +64,7 @@ export function WalletSwitcher() {
             <DropdownMenuLabel className="text-xs text-muted-foreground">Wallets</DropdownMenuLabel>
             {wallets.map((w) => {
               const Icon = KIND[w.kind].icon
-              const bal = btc(w.id)
+              const bal = balance(w.id)
               return (
                 <DropdownMenuItem
                   key={w.id}
@@ -78,7 +80,15 @@ export function WalletSwitcher() {
                       {w.name}
                       {w.watchOnly && <EyeIcon className="size-3 text-sky-600 dark:text-sky-400" />}
                     </span>
-                    <span className="font-mono text-xs text-muted-foreground">{formatCoins(bal.confirmed + bal.unconfirmed)} BTC</span>
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {w.accounts[family] ? (
+                        <>
+                          {formatAmount(bal.confirmed + bal.unconfirmed, unit)} <UnitLabel chain={chain} />
+                        </>
+                      ) : (
+                        `not on ${FAMILIES[family].label} yet`
+                      )}
+                    </span>
                   </span>
                   {w.id === wallet?.id && <CheckIcon className="size-4" />}
                 </DropdownMenuItem>

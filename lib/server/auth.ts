@@ -61,4 +61,4 @@ export async function authorizedJson<T extends object>(req: Request): Promise<T 
   return (await requireNostr(req, body)) ?? body
 }
 
-export const isChain = (c: unknown): c is "btc" | "xbt" => c === "btc" || c === "xbt"
+export { isChain } from "@/lib/chains"

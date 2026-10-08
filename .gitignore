@@ -25,6 +25,12 @@ next-env.d.ts
 *.db-shm
 *.db-wal
 
+# desktop (Tauri) build output: Rust target, bundled server and Node sidecar (scripts/desktop.mjs)
+/src-tauri/target/
+/src-tauri/server/
+/src-tauri/binaries/
+/src-tauri/gen/
+
 # generated Prisma client (rebuilt by `pnpm install` → postinstall)
 /lib/generated/
 

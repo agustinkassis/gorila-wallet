@@ -1,7 +1,7 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
 import { broadcastHex } from "@/lib/server/broadcast"
 import { analyzeReplay } from "@/lib/server/replay"
-import { ExtensionDisabledError, chainFor } from "@/lib/server/watcher"
+import { ChainInactiveError, chainFor } from "@/lib/server/watcher"
 
 /**
  * POST {walletId, chain, txid} → {txid}. Re-analyzes on the server and broadcasts the source chain's own bytes
@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     const txid = await broadcastHex(await chainFor(analysis.to), analysis.hex)
     return Response.json({ txid, to: analysis.to })
   } catch (e) {
-    if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
+    if (e instanceof ChainInactiveError) return Response.json({ error: e.message }, { status: 409 })
     return Response.json({ error: (e as Error).message || "Replay failed" }, { status: 422 })
   }
 }

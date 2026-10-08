@@ -9,7 +9,8 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
+  --font-heading: var(--font-display);
+  --shadow-glass: inset 0 1px 0 0 var(--glass-highlight), 0 18px 40px -24px var(--glass-shadow);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -49,72 +50,85 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  /* "Night vault": warm paper by day, violet ink by night; Bitcoin orange is the accent, Blake violet the second */
+  --background: oklch(0.972 0.012 75);
+  --foreground: oklch(0.21 0.025 285);
+  --card: oklch(1 0 0 / 0.62);
+  --card-foreground: oklch(0.21 0.025 285);
+  --popover: oklch(0.99 0.006 75);
+  --popover-foreground: oklch(0.21 0.025 285);
+  --primary: oklch(0.735 0.169 61);
+  --primary-foreground: oklch(0.2 0.03 50);
+  --secondary: oklch(0.21 0.025 285 / 6%);
+  --secondary-foreground: oklch(0.21 0.025 285);
+  --muted: oklch(0.21 0.025 285 / 5%);
+  --muted-foreground: oklch(0.47 0.02 285);
+  --accent: oklch(0.21 0.025 285 / 7%);
+  --accent-foreground: oklch(0.21 0.025 285);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: oklch(0.21 0.025 285 / 10%);
+  --input: oklch(0.21 0.025 285 / 14%);
+  --ring: oklch(0.735 0.169 61);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.75rem;
+  --sidebar: oklch(1 0 0 / 0);
+  --sidebar-foreground: oklch(0.21 0.025 285);
+  --sidebar-primary: oklch(0.735 0.169 61);
+  --sidebar-primary-foreground: oklch(0.2 0.03 50);
+  --sidebar-accent: oklch(0.21 0.025 285 / 7%);
+  --sidebar-accent-foreground: oklch(0.21 0.025 285);
+  --sidebar-border: oklch(0.21 0.025 285 / 10%);
+  --sidebar-ring: oklch(0.735 0.169 61);
+  --glass-highlight: oklch(1 0 0 / 0.75);
+  --glass-shadow: oklch(0.3 0.04 285 / 0.16);
+  --aurora-1: oklch(0.82 0.14 62 / 0.45);
+  --aurora-2: oklch(0.72 0.16 300 / 0.3);
+  --aurora-3: oklch(0.9 0.09 90 / 0.4);
+  --grain: 0.04;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.155 0.018 285);
+  --foreground: oklch(0.96 0.008 80);
+  --card: oklch(0.24 0.02 285 / 0.5);
+  --card-foreground: oklch(0.96 0.008 80);
+  --popover: oklch(0.2 0.02 285);
+  --popover-foreground: oklch(0.96 0.008 80);
+  --primary: oklch(0.77 0.16 63);
+  --primary-foreground: oklch(0.18 0.03 50);
+  --secondary: oklch(1 0 0 / 7%);
+  --secondary-foreground: oklch(0.96 0.008 80);
+  --muted: oklch(1 0 0 / 6%);
+  --muted-foreground: oklch(0.72 0.015 285);
+  --accent: oklch(1 0 0 / 8%);
+  --accent-foreground: oklch(0.96 0.008 80);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 13%);
+  --ring: oklch(0.77 0.16 63);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar: oklch(0 0 0 / 0);
+  --sidebar-foreground: oklch(0.96 0.008 80);
+  --sidebar-primary: oklch(0.77 0.16 63);
+  --sidebar-primary-foreground: oklch(0.18 0.03 50);
+  --sidebar-accent: oklch(1 0 0 / 8%);
+  --sidebar-accent-foreground: oklch(0.96 0.008 80);
+  --sidebar-border: oklch(1 0 0 / 9%);
+  --sidebar-ring: oklch(0.77 0.16 63);
+  --glass-highlight: oklch(1 0 0 / 0.08);
+  --glass-shadow: oklch(0 0 0 / 0.45);
+  --aurora-1: oklch(0.6 0.16 55 / 0.32);
+  --aurora-2: oklch(0.48 0.21 295 / 0.4);
+  --aurora-3: oklch(0.55 0.1 210 / 0.14);
+  --grain: 0.07;
 }
 
 @layer base {
@@ -129,8 +143,92 @@
   }
   html {
     @apply font-sans;
+    font-size: 106.25%; /* 17px: everything (rem-based) a notch larger */
+  }
+  /* Atmosphere behind the glass: two brand-colored glows and fine grain, fixed so content scrolls over them */
+  body {
+    isolation: isolate;
+  }
+  body::before,
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+  body::before {
+    z-index: -2;
+    background:
+      radial-gradient(48vmax 36vmax at 8% 0%, var(--aurora-1), transparent 70%),
+      radial-gradient(44vmax 40vmax at 100% 100%, var(--aurora-2), transparent 70%),
+      radial-gradient(30vmax 26vmax at 75% 8%, var(--aurora-3), transparent 70%);
+  }
+  body::after {
+    z-index: -1;
+    opacity: var(--grain);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  h1, h2, h3, [data-slot="card-title"], [data-slot="dialog-title"] {
+    letter-spacing: -0.015em;
+  }
+
+  /* Things arrive: cards rise in a short stagger, table rows fade up (new live rows too) */
+  [data-slot="card"] {
+    animation: var(--animate-rise);
+  }
+  [data-slot="card"]:nth-child(2) { animation-delay: 60ms; }
+  [data-slot="card"]:nth-child(3) { animation-delay: 120ms; }
+  [data-slot="card"]:nth-child(4) { animation-delay: 180ms; }
+  [data-slot="card"]:nth-child(n + 5) { animation-delay: 240ms; }
+  [data-slot="table-body"] > tr {
+    animation: var(--animate-row-in);
+  }
+  [data-slot="table-body"] > tr:nth-child(2) { animation-delay: 30ms; }
+  [data-slot="table-body"] > tr:nth-child(3) { animation-delay: 60ms; }
+  [data-slot="table-body"] > tr:nth-child(4) { animation-delay: 90ms; }
+  [data-slot="table-body"] > tr:nth-child(5) { animation-delay: 120ms; }
+  [data-slot="table-body"] > tr:nth-child(6) { animation-delay: 150ms; }
+  [data-slot="table-body"] > tr:nth-child(n + 7) { animation-delay: 180ms; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
+
+/* Page changes (app/template.tsx), card and row entrances */
+@theme {
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-page-in: page-in 0.5s var(--ease-out-expo) both;
+  --animate-rise: rise 0.6s var(--ease-out-expo) both;
+  --animate-row-in: row-in 0.45s var(--ease-out-expo) both;
+
+  @keyframes page-in {
+    from { opacity: 0; transform: translateY(12px); filter: blur(6px); }
+    to { opacity: 1; transform: none; filter: none; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(16px) scale(0.985); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes row-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+}
+/* Theme switch: the circular reveal animates the new snapshot itself (components/site-header.tsx), not a crossfade */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
 /* Incoming-payment animations (balance card) */
 @theme {
   --animate-receive-glow: receive-glow 2.2s ease-out forwards;

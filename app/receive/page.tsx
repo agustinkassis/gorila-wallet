@@ -11,10 +11,10 @@ import { LabelEditor } from "@/components/label-editor"
 import { QrImage } from "@/components/qr"
 import { copy, shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
-import { hasData, nextUnused } from "@/lib/wallet"
+import { CHAINS, hasData, nextUnused } from "@/lib/wallet"
 
 export default function ReceivePage() {
-  const { snapshots, path, settings, chains } = useWallet()
+  const { snapshots, path, settings, chains, chain, pair } = useWallet()
   const [offset, setOffset] = useState(0)
   /** address picked from the table; null = next unused (+ offset) */
   const [picked, setPicked] = useState<string | null>(null)
@@ -46,7 +46,7 @@ export default function ReceivePage() {
         <CardHeader>
           <CardTitle>Receive</CardTitle>
           <CardDescription>
-            A fresh address for every payment.{chains.includes("xbt") && " The same address works on Bitcoin and Blake."}
+            A fresh address for every payment.{pair && ` The same address works on ${CHAINS[chain].label} and ${CHAINS[pair].label}.`}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-4">

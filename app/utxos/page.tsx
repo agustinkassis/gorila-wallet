@@ -15,17 +15,19 @@ import { shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
 import { api } from "@/lib/api"
 import { INPUT_VSIZE } from "@/lib/tx"
-import { CHAINS, formatCoins, hasData, sharedOutpoints, type Chain } from "@/lib/wallet"
+import { UnitLabel, useUnit } from "@/components/units"
+import { CHAINS, formatAmount, hasData, sharedOutpoints, type Chain } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 type Filter = Chain | "all"
 
 export default function UtxosPage() {
-  const { snapshots, chains, wallet, watchOnly } = useWallet()
+  const unit = useUnit()
+  const { snapshots, chains, chain: active, wallet, watchOnly } = useWallet()
   const router = useRouter()
   const [filter, setFilter] = useState<Filter>("all")
   const [selected, setSelected] = useState<{ chain: Chain; ops: Set<string> } | null>(null)
-  const shared = useMemo(() => sharedOutpoints(snapshots), [snapshots])
+  const shared = useMemo(() => sharedOutpoints(snapshots, active), [snapshots, active])
 
   if (!chains.some((c) => hasData(snapshots[c]))) return <Skeleton className="h-96 w-full rounded-xl" />
 
@@ -67,9 +69,9 @@ export default function UtxosPage() {
                   {CHAINS[chain].label} · {utxos.length} coin{utxos.length === 1 ? "" : "s"}
                 </CardDescription>
                 <CardTitle className="font-mono text-2xl tabular-nums">
-                  {formatCoins(spendable)} <span className={cn("text-sm", CHAINS[chain].text)}>{CHAINS[chain].unit}</span>
+                  {formatAmount(spendable, unit)} <UnitLabel chain={chain} className={cn("text-sm", CHAINS[chain].text)} />
                 </CardTitle>
-                <CardDescription>{frozen > 0 ? `${formatCoins(frozen)} frozen` : "Nothing frozen"}</CardDescription>
+                <CardDescription>{frozen > 0 ? `${formatAmount(frozen, unit)} frozen` : "Nothing frozen"}</CardDescription>
               </CardHeader>
             </Card>
           )
@@ -174,7 +176,7 @@ export default function UtxosPage() {
                       <TableCell className="hidden md:table-cell">
                         <LabelEditor chain={u.chain} type="output" target={op} value={u.label} />
                       </TableCell>
-                      <TableCell className="text-right font-mono text-xs tabular-nums sm:text-sm">{formatCoins(u.value)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs tabular-nums sm:text-sm">{formatAmount(u.value, unit)}</TableCell>
                       <TableCell className="hidden text-right font-mono text-xs sm:table-cell">{confs || "—"}</TableCell>
                       <TableCell className="pr-4 text-right sm:pr-2">
                         <div className="flex justify-end gap-0.5 sm:gap-1">

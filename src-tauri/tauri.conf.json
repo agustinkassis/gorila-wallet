@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Gorilla Wallet",
+  "version": "../package.json",
+  "identifier": "com.gorillawallet.desktop",
+  "build": {
+    "beforeBuildCommand": "node scripts/desktop.mjs",
+    "beforeDevCommand": "node scripts/desktop.mjs"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "deb", "rpm", "appimage"],
+    "category": "Finance",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "resources": { "server/": "server/" },
+    "externalBin": ["binaries/gorilla-node"],
+    "macOS": {
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}

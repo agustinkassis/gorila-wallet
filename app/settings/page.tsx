@@ -1,19 +1,35 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { DownloadIcon, PuzzleIcon, Trash2Icon, UploadIcon, UsersIcon } from "lucide-react"
+import { CheckIcon, DownloadIcon, NetworkIcon, Trash2Icon, UploadIcon, UsersIcon } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { useWallet } from "@/components/wallet-provider"
 import { KIND, WatchOnlyBadge } from "@/components/wallet-switcher"
 import { api, download } from "@/lib/api"
 import { canNotify, requestNotifications } from "@/lib/notify"
-import { CHAINS, type Chain, type FeePreset, type Settings } from "@/lib/wallet"
+import { minDataScript } from "@/lib/chains"
+import {
+  CHAINS,
+  CHAIN_IDS,
+  FAMILIES,
+  displayXpub,
+  type Account,
+  type Chain,
+  type ChainSources,
+  type Family,
+  type FeePreset,
+  type Settings,
+} from "@/lib/wallet"
 import { cn } from "@/lib/utils"
+
+/** chains whose sends can carry an OP_RETURN their replay pair rejects (Bitcoin vs Blake) */
+const GUARDED = CHAIN_IDS.filter((c) => minDataScript(c) > 0)
 
 const PRESETS: { key: FeePreset; label: string }[] = [
   { key: "fastestFee", label: "Fastest" },
@@ -23,7 +39,7 @@ const PRESETS: { key: FeePreset; label: string }[] = [
 ]
 
 export default function SettingsPage() {
-  const { settings, snapshots, chains } = useWallet()
+  const { settings, chains } = useWallet()
   const save = async (patch: Partial<Settings>) => {
     try {
       await api("/api/settings", patch)
@@ -34,29 +50,7 @@ export default function SettingsPage() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <PuzzleIcon className="size-4" /> Extensions
-          </CardTitle>
-          <CardDescription>Optional chains and features. Turning one off stops its sync; its cached data stays for when you turn it back on.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <label className="flex items-start justify-between gap-4 rounded-lg border p-4">
-            <span className="flex flex-col gap-1">
-              <span className="flex items-center gap-2 text-sm font-medium">
-                <span className={cn("size-2 rounded-full", CHAINS.xbt.bg)} />
-                Blake2b (XBT)
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Track and spend the Bitcoin BLAKE2b fork with the same keys. Blake sends are replay-protected with SIGHASH_UNIFIED, and Bitcoin sends get
-                the optional Bitcoin-only OP_RETURN guard.
-              </span>
-            </span>
-            <Switch checked={settings.blake} onCheckedChange={(blake) => save({ blake })} aria-label="Blake2b extension" />
-          </label>
-        </CardContent>
-      </Card>
+      <NetworksCard />
 
       <Card>
         <CardHeader>
@@ -99,13 +93,11 @@ export default function SettingsPage() {
               ))}
             </div>
           </div>
-          {settings.blake && (
-            <Toggle
-              label="Bitcoin-only OP_RETURN replay guard on by default"
-              checked={settings.replayGuard}
-              onChange={(replayGuard) => save({ replayGuard })}
-            />
-          )}
+          <Toggle
+            label={`${GUARDED.map((c) => CHAINS[c].label).join(" / ")}-only OP_RETURN replay guard on by default`}
+            checked={settings.replayGuard}
+            onChange={(replayGuard) => save({ replayGuard })}
+          />
         </CardContent>
       </Card>
 
@@ -135,21 +127,124 @@ export default function SettingsPage() {
       <WalletCard />
       <AccessCard />
 
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle>Servers</CardTitle>
-          <CardDescription>From .env, or the defaults in .env.example.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2 text-sm">
-          {chains.map((c) => (
-            <Info
-              key={c}
-              label={`${CHAINS[c].label}`}
-              value={`Electrum ${snapshots[c]?.server ?? "connecting…"} · mempool ${snapshots[c]?.explorer ?? "—"}`}
-            />
-          ))}
-        </CardContent>
-      </Card>
+    </div>
+  )
+}
+
+type Effective = Record<Chain, Required<ChainSources> & { custom: boolean }>
+
+/** Every chain: features, select it, and its Electrum / mempool sources (custom lists or the defaults). */
+function NetworksCard() {
+  const { settings, chain: active, snapshots } = useWallet()
+  const [effective, setEffective] = useState<Effective | null>(null)
+  const [editing, setEditing] = useState<Chain | null>(null)
+  const load = () => api<Effective>("/api/settings").then(setEffective, () => {})
+  useEffect(() => void load(), [settings.sources])
+
+  const select = async (chain: Chain) => {
+    try {
+      await api("/api/settings", { chain })
+    } catch (e) {
+      toast.error("Couldn't switch network", { description: (e as Error).message })
+    }
+  }
+  const saveSources = async (chain: Chain, next: ChainSources | null) => {
+    const sources = { ...settings.sources }
+    if (next) sources[chain] = next
+    else delete sources[chain]
+    try {
+      await api("/api/settings", { sources })
+      setEditing(null)
+      toast.success(next ? `${CHAINS[chain].label} sources saved` : `${CHAINS[chain].label} back to the default sources`)
+    } catch (e) {
+      toast.error("Couldn't save sources", { description: (e as Error).message })
+    }
+  }
+
+  return (
+    <Card className="lg:col-span-2">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <NetworkIcon className="size-4" /> Networks
+        </CardTitle>
+        <CardDescription>
+          One network at a time (also from the navbar). Each chain can use several Electrum servers and mempool explorers, tried in order; a fork&apos;s
+          replay pair syncs along for replay checks.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {CHAIN_IDS.map((c) => {
+          const def = CHAINS[c]
+          const src = effective?.[c]
+          const features = [
+            FAMILIES[def.family].label,
+            def.unifiedSighash && "SIGHASH_UNIFIED",
+            def.replayPair && `replays ↔ ${CHAINS[def.replayPair].label}`,
+            def.maxScript && `scripts ≤ ${def.maxScript} B`,
+            typeof def.maxDataScript === "number" && `OP_RETURN ≤ ${def.maxDataScript} B`,
+          ].filter(Boolean)
+          return (
+            <div key={c} className={cn("flex flex-col gap-3 rounded-lg border p-4", c === active && "border-primary/50 bg-primary/5")}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="flex min-w-0 flex-col gap-1">
+                  <span className="flex items-center gap-2 font-medium">
+                    <span className={cn("size-2.5 rounded-full", def.bg)} />
+                    {def.label}
+                    <span className="text-xs font-normal text-muted-foreground">{def.unit}</span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">{features.join(" · ")}</span>
+                </span>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setEditing(editing === c ? null : c)}>
+                    Sources{src?.custom ? " · custom" : ""}
+                  </Button>
+                  {c === active ? (
+                    <Button size="sm" variant="secondary" disabled>
+                      <CheckIcon /> Selected
+                    </Button>
+                  ) : (
+                    <Button size="sm" onClick={() => select(c)}>
+                      Select
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {c === active && snapshots[c] && (
+                <Info label="Connected" value={`Electrum ${snapshots[c]?.server ?? "connecting…"} · explorer ${snapshots[c]?.explorer || "—"}`} />
+              )}
+              {editing === c && src && <SourcesEditor chain={c} sources={src} onSave={(next) => saveSources(c, next)} />}
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
+function SourcesEditor({ chain, sources, onSave }: { chain: Chain; sources: Effective[Chain]; onSave: (next: ChainSources | null) => void }) {
+  const [electrum, setElectrum] = useState(sources.electrum.join("\n"))
+  const [mempool, setMempool] = useState(sources.mempool.join("\n"))
+  const lines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean)
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs text-muted-foreground">Electrum / Fulcrum (tcp:// or ssl://host:port), one per line</Label>
+        <Textarea rows={4} spellCheck={false} className="font-mono text-xs" value={electrum} onChange={(e) => setElectrum(e.target.value)} />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs text-muted-foreground">mempool.space-compatible APIs (fees, broadcast, explorer), one per line</Label>
+        <Textarea rows={4} spellCheck={false} className="font-mono text-xs" value={mempool} onChange={(e) => setMempool(e.target.value)} />
+      </div>
+      <div className="flex gap-2 sm:col-span-2">
+        <Button size="sm" onClick={() => onSave({ electrum: lines(electrum), mempool: lines(mempool) })}>
+          Save {CHAINS[chain].label} sources
+        </Button>
+        {sources.custom && (
+          <Button size="sm" variant="ghost" onClick={() => onSave(null)}>
+            Reset to defaults
+          </Button>
+        )}
+      </div>
     </div>
   )
 }
@@ -270,7 +365,9 @@ function WalletCard() {
         </CardTitle>
         <CardDescription>
           {wallet.kind === "seed"
-            ? "Recovery words are stored encrypted with this wallet's password; you enter it to sign."
+            ? wallet.needsPassword
+              ? "Recovery words are stored encrypted with this wallet's password; you enter it to sign."
+              : "No password: recovery words are stored unencrypted, and signing asks for nothing."
             : wallet.kind === "env"
               ? "From SEED_PHRASE in .env. The seed never leaves the server and is never written to the database."
               : "Public key only: balances and history, no signing."}
@@ -298,10 +395,15 @@ function WalletCard() {
             />
           )}
         </div>
-        <Info label="Derivation path" value={wallet.path} />
-        <Info label="Master fingerprint" value={wallet.fingerprint ? wallet.fingerprint.toString(16).padStart(8, "0") : "unknown"} />
         {wallet.passphrase && <Info label="BIP39 passphrase" value="yes (not stored in clear)" />}
-        <Info label="Account xpub" value={wallet.xpub} />
+        {(Object.entries(wallet.accounts) as [Family, Account][]).map(([family, a]) => (
+          <div key={family} className="flex flex-col gap-2 rounded-lg border p-3">
+            <span className="text-xs font-medium text-muted-foreground">{FAMILIES[family].label} account</span>
+            <Info label="Derivation path" value={a.path} />
+            <Info label="Master fingerprint" value={a.fingerprint ? a.fingerprint.toString(16).padStart(8, "0") : "unknown"} />
+            <Info label="Account xpub" value={displayXpub(a.xpub, family)} />
+          </div>
+        ))}
         {wallet.kind !== "env" && (
           <div className="flex flex-wrap items-center gap-2 pt-1">
             {confirming ? (

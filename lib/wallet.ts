@@ -1,16 +1,11 @@
 import { HDKey } from "@scure/bip32"
-import { Address, NETWORK, OutScript, p2wpkh } from "@scure/btc-signer"
+import { Address, OutScript, p2wpkh } from "@scure/btc-signer"
 import { sha256 } from "@noble/hashes/sha2.js"
 import { bytesToHex, concatBytes } from "@noble/hashes/utils.js"
 import { createBase58check } from "@scure/base"
+import { CHAINS, networkOf, type Chain, type Family } from "@/lib/chains"
 
-export type Chain = "btc" | "xbt"
-
-export const CHAINS: Record<Chain, { label: string; unit: string; text: string; bg: string }> = {
-  btc: { label: "Bitcoin", unit: "BTC", text: "text-orange-600 dark:text-orange-400", bg: "bg-orange-500" },
-  xbt: { label: "Blake", unit: "XBT", text: "text-violet-600 dark:text-violet-400", bg: "bg-violet-500" },
-}
-export const CHAIN_IDS = Object.keys(CHAINS) as Chain[]
+export { CHAINS, CHAIN_IDS, FAMILIES, familyOf, isChain, syncedChains, type Chain, type Family } from "@/lib/chains"
 
 /** Addresses shown on the dashboard (receive chain). Discovery goes further, up to the gap limit. */
 export const ADDRESS_COUNT = 10
@@ -28,15 +23,16 @@ export type Utxo = { txid: string; vout: number; address: string; value: number;
 export type Tx = { txid: string; height: number; time: number | null; amount: number; fee?: number | null; vsize?: number | null; label?: string }
 export type Fees = { fastestFee: number; halfHourFee: number; hourFee: number; economyFee: number; minimumFee: number }
 
-/** env: the .env seed · seed: software wallet (encrypted, password to sign) · watch: xpub only */
+/** env: the .env seed · seed: software wallet (encrypted with its password, if it has one) · watch: xpub only */
 export type WalletKind = "env" | "seed" | "watch"
+/** A wallet's account key on one family of chains (xpub stored with mainnet version bytes). */
+export type Account = { xpub: string; path: string; fingerprint: number }
 export type WalletInfo = {
   id: string
   name: string
   kind: WalletKind
-  xpub: string
-  path: string
-  fingerprint: number
+  /** per family; a missing one is enabled from the seed (password if any), watch-only wallets have just one */
+  accounts: Partial<Record<Family, Account>>
   watchOnly: boolean
   /** signing asks for this wallet's password */
   needsPassword: boolean
@@ -61,9 +57,12 @@ export type Snapshot = {
 }
 
 export type FeePreset = keyof Fees
+/** Where a chain's data comes from; an empty or missing list means the built-in defaults. */
+export type ChainSources = { electrum?: string[]; mempool?: string[] }
 export type Settings = {
-  /** Blake2b extension: track and spend the BLAKE2b fork (XBT) */
-  blake: boolean
+  /** the selected network (navbar); its replay pair, if any, syncs along */
+  chain: Chain
+  sources: Partial<Record<Chain, ChainSources>>
   sound: boolean
   notifications: boolean
   feePreset: FeePreset
@@ -73,7 +72,8 @@ export type Settings = {
   gapChange: number
 }
 export const DEFAULT_SETTINGS: Settings = {
-  blake: true,
+  chain: "btc",
+  sources: {},
   sound: true,
   notifications: true,
   feePreset: "halfHourFee",
@@ -89,41 +89,60 @@ export type StreamMessage =
 
 const base58check = createBase58check(sha256)
 const XPUB = Uint8Array.of(0x04, 0x88, 0xb2, 0x1e)
-const ZPUB = Uint8Array.of(0x04, 0xb2, 0x47, 0x46)
+const TPUB = Uint8Array.of(0x04, 0x35, 0x87, 0xcf)
+/** version bytes → family: xpub/zpub (BIP84) on mainnet, tpub/vpub on testnets */
+const VERSIONS: [Uint8Array, Family][] = [
+  [XPUB, "main"],
+  [Uint8Array.of(0x04, 0xb2, 0x47, 0x46), "main"],
+  [TPUB, "test"],
+  [Uint8Array.of(0x04, 0x5f, 0x1c, 0xf6), "test"],
+]
 
 /**
- * Accept an account-level xpub or zpub (BIP84 native SegWit) and return it as an xpub.
- * Throws on anything else (private keys, other script types, testnet, bad checksum).
+ * Accept an account-level xpub/zpub (mainnet) or tpub/vpub (testnets, signet) and return it with xpub version bytes
+ * (how accounts are stored and derived) plus its family. Throws on anything else (private keys, bad checksum).
  */
-export function normalizeXpub(input: string) {
+export function normalizeXpub(input: string): { xpub: string; family: Family } {
   const raw = base58check.decode(input.trim())
   if (raw.length !== 78) throw new Error("Not an extended public key")
-  const version = raw.slice(0, 4)
-  const same = (a: Uint8Array, b: Uint8Array) => a.every((x, i) => x === b[i])
-  if (!same(version, XPUB) && !same(version, ZPUB)) throw new Error("Use an xpub or zpub (native SegWit, mainnet)")
+  const family = VERSIONS.find(([v]) => v.every((x, i) => x === raw[i]))?.[1]
+  if (!family) throw new Error("Use an xpub/zpub (mainnet) or tpub/vpub (testnet, signet)")
   const xpub = base58check.encode(concatBytes(XPUB, raw.slice(4)))
   HDKey.fromExtendedKey(xpub) // validates the key itself
-  return xpub
+  return { xpub, family }
 }
+
+/** An account xpub as other wallets show it on its family: xpub on mainnet, tpub on testnets. */
+export const displayXpub = (xpub: string, family: Family) =>
+  family === "main" ? xpub : base58check.encode(concatBytes(TPUB, base58check.decode(xpub).slice(4)))
 
 export const DERIVATION_PATH = /^m(\/\d+'?)+$/
 
-export function deriveAddress(xpub: string, change: 0 | 1, index: number) {
+export function deriveAddress(xpub: string, change: 0 | 1, index: number, family: Family) {
   const key = HDKey.fromExtendedKey(xpub).deriveChild(change).deriveChild(index)
-  return { address: p2wpkh(key.publicKey!).address!, publicKey: key.publicKey! }
+  return { address: p2wpkh(key.publicKey!, networkOf(family)).address!, publicKey: key.publicKey! }
 }
 
-export function deriveAddresses(xpub: string, count = ADDRESS_COUNT, change: 0 | 1 = 0) {
+export function deriveAddresses(xpub: string, family: Family, count = ADDRESS_COUNT, change: 0 | 1 = 0) {
   const branch = HDKey.fromExtendedKey(xpub).deriveChild(change)
-  return Array.from({ length: count }, (_, i) => p2wpkh(branch.deriveChild(i).publicKey!).address!)
+  return Array.from({ length: count }, (_, i) => p2wpkh(branch.deriveChild(i).publicKey!, networkOf(family)).address!)
 }
 
-export const addressScript = (address: string) => OutScript.encode(Address(NETWORK).decode(address))
+export const addressScript = (address: string, family: Family) => OutScript.encode(Address(networkOf(family)).decode(address))
 
 // Electrum scripthash: sha256(scriptPubKey), byte-reversed hex.
-export const scriptHash = (address: string) => bytesToHex(sha256(addressScript(address)).reverse())
+export const scriptHash = (address: string, family: Family) => bytesToHex(sha256(addressScript(address, family)).reverse())
 
 export const formatCoins = (sats: number) => (sats / 1e8).toFixed(8)
+
+/** Display unit (header switch): the chain's coin, or sats. */
+export type Unit = "btc" | "sats"
+
+/** Number only, in the chosen unit: "0.00150000" or "150,000" (en-US grouping: a "." would read as a BTC decimal). */
+export const formatAmount = (sats: number, unit: Unit) => (unit === "sats" ? sats.toLocaleString("en-US") : formatCoins(sats))
+
+/** With its unit, for plain text (toasts, summaries): "0.00150000 XBT" or "150,000 sats". */
+export const amountText = (sats: number, chain: Chain, unit: Unit) => `${formatAmount(sats, unit)} ${unit === "sats" ? "sats" : CHAINS[chain].unit}`
 
 export const sumBalances = (s?: Snapshot) =>
   (s?.addresses ?? []).reduce(
@@ -134,10 +153,12 @@ export const sumBalances = (s?: Snapshot) =>
 /** Snapshot has real data (kept while reconnecting, so last known values stay visible). */
 export const hasData = (s?: Snapshot): s is Snapshot => !!s?.synced
 
-/** Outpoints present on both chains: pre-fork coins whose normal BTC spend can be replayed on Blake. */
-export function sharedOutpoints(snapshots: Partial<Record<Chain, Snapshot>>) {
-  const xbt = new Set((snapshots.xbt?.utxos ?? []).map((u) => `${u.txid}:${u.vout}`))
-  return new Set((snapshots.btc?.utxos ?? []).map((u) => `${u.txid}:${u.vout}`).filter((o) => xbt.has(o)))
+/** Outpoints unspent on a chain and on its replay pair: pre-fork coins whose spend can be replayed across. */
+export function sharedOutpoints(snapshots: Partial<Record<Chain, Snapshot>>, chain: Chain) {
+  const pair = CHAINS[chain].replayPair
+  if (!pair) return new Set<string>()
+  const other = new Set((snapshots[pair]?.utxos ?? []).map((u) => `${u.txid}:${u.vout}`))
+  return new Set((snapshots[chain]?.utxos ?? []).map((u) => `${u.txid}:${u.vout}`).filter((o) => other.has(o)))
 }
 
 /** First address on a branch that is unused on every chain. */
@@ -174,3 +195,13 @@ export function parseCoins(input: string): number | null {
   const sats = Number(m[1] || "0") * 1e8 + Number((m[2] ?? "").padEnd(8, "0"))
   return Number.isSafeInteger(sats) ? sats : null
 }
+
+/** "150,000" → 150000. null unless a whole number of sats. */
+export function parseSats(input: string): number | null {
+  const s = input.replace(/[\s,_]/g, "")
+  return /^\d+$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null
+}
+
+/** Amount fields, typed in the chosen unit. */
+export const parseAmount = (input: string, unit: Unit) => (unit === "sats" ? parseSats(input) : parseCoins(input))
+export const amountInput = (sats: number, unit: Unit) => (unit === "sats" ? String(sats) : formatCoins(sats))

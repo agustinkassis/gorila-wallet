@@ -1,8 +1,8 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
 import { analyzeReplay } from "@/lib/server/replay"
-import { ExtensionDisabledError } from "@/lib/server/watcher"
+import { ChainInactiveError } from "@/lib/server/watcher"
 
-/** POST {walletId, chain, txid} → replay analysis of that tx onto the other chain (needs the Blake2b extension). */
+/** POST {walletId, chain, txid} → replay analysis of that tx onto the other chain (its replay pair, e.g. Bitcoin ↔ Blake). */
 export async function POST(req: Request) {
   const body = await authorizedJson<{ walletId?: unknown; chain?: unknown; txid?: unknown }>(req)
   if (body instanceof Response) return body
@@ -11,7 +11,7 @@ export async function POST(req: Request) {
   try {
     return Response.json(await analyzeReplay(body.walletId, body.chain, body.txid))
   } catch (e) {
-    if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
+    if (e instanceof ChainInactiveError) return Response.json({ error: e.message }, { status: 409 })
     return Response.json({ error: "Transaction not found" }, { status: 404 })
   }
 }
