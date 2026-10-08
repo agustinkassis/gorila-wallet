@@ -6,7 +6,7 @@ const listeners = new Set<(s: Settings) => void>()
 export const onSettings = (l: (s: Settings) => void) => (listeners.add(l), () => void listeners.delete(l))
 
 export async function getSettings(): Promise<Settings> {
-  const rows = await db.setting.findMany()
+  const rows = await db.setting.findMany({ where: { key: { in: Object.keys(DEFAULT_SETTINGS) } } })
   return { ...DEFAULT_SETTINGS, ...Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.value)])) }
 }
 

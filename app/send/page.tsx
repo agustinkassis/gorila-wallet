@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useEffect, useMemo, useState } from "react"
+import { Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { base64 } from "@scure/base"
 import { Script } from "@scure/btc-signer"
@@ -8,6 +8,9 @@ import { bytesToHex as toHex, utf8ToBytes } from "@noble/hashes/utils.js"
 import {
   AlertTriangleIcon,
   ArrowLeftIcon,
+  ClipboardPasteIcon,
+  ScanLineIcon,
+  UploadIcon,
   CheckCircle2Icon,
   CheckIcon,
   CopyIcon,
@@ -35,6 +38,8 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { PsbtQr, QrImage } from "@/components/qr"
+import { QrScanner, type Scanned } from "@/components/qr-scanner"
+import { WatchOnlyBadge } from "@/components/wallet-switcher"
 import { copy, shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
 import { api, download } from "@/lib/api"
@@ -46,6 +51,7 @@ import {
   buildPsbt,
   cpfpFee,
   feeAt,
+  importSigned,
   opReturnScript,
   parseTxHex,
   planTx,
@@ -100,6 +106,20 @@ function Send() {
   const chain: Chain = params.get("chain") === "xbt" && wallet.chains.includes("xbt") ? "xbt" : "btc"
   const snap = wallet.snapshots[chain]
 
+  if (wallet.watchOnly)
+    return (
+      <Card className="mx-auto w-full max-w-lg">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            Sending is disabled <WatchOnlyBadge />
+          </CardTitle>
+          <CardDescription>
+            {wallet.wallet?.name} is a watch-only wallet: it has the xpub but no keys, so it can&apos;t sign. Switch to a wallet with keys from the
+            wallet menu, or add one.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    )
   if (!hasData(snap) || wallet.fingerprint === undefined || !wallet.xpub) return <Skeleton className="h-96 w-full rounded-xl" />
 
   return (
@@ -293,10 +313,11 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
     }
   }
 
-  const sign = async (psbt: Uint8Array) => {
+  const sign = async (psbt: Uint8Array, password?: string) => {
     setBusy(true)
     try {
-      setStep({ name: "signed", signed: await api<Signed>("/api/sign", { chain, psbt: base64.encode(psbt) }) })
+      const signed = await api<Signed>("/api/sign", { walletId: wallet.wallet?.id, chain, psbt: base64.encode(psbt), password })
+      setStep({ name: "signed", signed })
     } catch (e) {
       toast.error("Signing refused", { description: (e as Error).message })
     } finally {
@@ -470,13 +491,13 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
                         <span className="font-mono text-xs">{shorten(coin.txid, 6)}:{coin.vout}</span>
                         {isLocked && <Badge variant="secondary">Replacing</Badge>}
                         {frozen && (
-                          <Badge variant="outline" className="gap-1 text-sky-400">
+                          <Badge variant="outline" className="gap-1 text-sky-600 dark:text-sky-400">
                             <SnowflakeIcon /> Frozen
                           </Badge>
                         )}
-                        {coin.height <= 0 && !isLocked && <Badge variant="outline" className="text-amber-400">Unconfirmed</Badge>}
+                        {coin.height <= 0 && !isLocked && <Badge variant="outline" className="text-amber-600 dark:text-amber-400">Unconfirmed</Badge>}
                         {shared.has(op) && <Badge variant="outline">On both chains</Badge>}
-                        {uneconomical && <Badge variant="outline" className="text-rose-400">Uneconomical</Badge>}
+                        {uneconomical && <Badge variant="outline" className="text-rose-600 dark:text-rose-400">Uneconomical</Badge>}
                       </div>
                       <div className="truncate text-xs text-muted-foreground">{label ?? `${coin.change ? "change" : "receive"} #${coin.index}`}</div>
                     </div>
@@ -493,7 +514,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
             <CardHeader>
               <CardTitle className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-2">
-                  <ShieldCheckIcon className="size-4 text-orange-400" /> Bitcoin-only OP_RETURN
+                  <ShieldCheckIcon className="size-4 text-orange-600 dark:text-orange-400" /> Bitcoin-only OP_RETURN
                 </span>
                 <Switch checked={guard} disabled={!editable} onCheckedChange={setGuard} aria-label="Bitcoin-only OP_RETURN" />
               </CardTitle>
@@ -563,7 +584,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
               />
             </div>
             {mode.kind === "bump" && bump && rate < minBumpRate && (
-              <p className="text-xs text-amber-400">Raised to {minBumpRate} sat/vB: a replacement must pay a higher rate than the original.</p>
+              <p className="text-xs text-amber-600 dark:text-amber-400">Raised to {minBumpRate} sat/vB: a replacement must pay a higher rate than the original.</p>
             )}
           </CardContent>
         </Card>
@@ -588,13 +609,13 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
                 <Row
                   label="Fee"
                   value={`${plan.fee.toLocaleString()} sats · ${(plan.fee / plan.vsize).toFixed(1)} sat/vB`}
-                  className={feeShare > 0.1 ? "text-amber-400" : undefined}
+                  className={feeShare > 0.1 ? "text-amber-600 dark:text-amber-400" : undefined}
                 />
                 {mode.kind === "cpfp" && cpfpParent?.fee != null && cpfpParent.vsize && (
                   <Row label="Package rate" value={`${((cpfpParent.fee + plan.fee) / (cpfpParent.vsize + plan.vsize)).toFixed(1)} sat/vB`} />
                 )}
                 {feeShare > 0.1 && (
-                  <p className="flex items-center gap-1 text-xs text-amber-400">
+                  <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
                     <AlertTriangleIcon className="size-3" /> Fee is {(feeShare * 100).toFixed(0)}% of the amount sent.
                   </p>
                 )}
@@ -604,7 +625,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
                 <p className="text-muted-foreground">{planError}</p>
                 {bumpShort && (
                   <div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 p-3 text-xs">
-                    <p className="text-amber-400">
+                    <p className="text-amber-600 dark:text-amber-400">
                       The original coins can&apos;t pay the higher fee with these amounts. Redesign the replacement: add coins in Coin control, lower an amount,
                       or take the fee from the payment.
                     </p>
@@ -622,7 +643,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
 
         {chain === "xbt" ? (
           <Alert>
-            <ShieldCheckIcon className="text-violet-400" />
+            <ShieldCheckIcon className="text-violet-600 dark:text-violet-400" />
             <AlertTitle>Replay-protected</AlertTitle>
             <AlertDescription>
               Signed with SIGHASH_UNIFIED (0x21), which Bitcoin rejects, so this only moves Blake coins. External signers need Bitcoin Knots 29.4.1+.
@@ -633,7 +654,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
           !guard &&
           !(mode.kind === "bump" && bump?.data) && (
             <Alert className="border-amber-500/40">
-              <AlertTriangleIcon className="text-amber-400" />
+              <AlertTriangleIcon className="text-amber-600 dark:text-amber-400" />
               <AlertTitle>Replayable on Blake</AlertTitle>
               <AlertDescription>
                 These coins also exist on Blake. Anyone can rebroadcast this transaction there and move your Blake coins too. Turn on the Bitcoin-only
@@ -653,7 +674,9 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
         chain={chain}
         explorer={snap.explorer}
         busy={busy}
+        needsPassword={!!wallet.wallet?.needsPassword}
         onSign={sign}
+        onSigned={(signed) => setStep({ name: "signed", signed })}
         onBroadcast={broadcast}
         onClose={() => (step.name === "sent" ? router.push(`/send?chain=${chain}&new=${Date.now()}`) : setStep({ name: "edit" }))}
       />
@@ -690,7 +713,9 @@ function TxDialog({
   chain,
   explorer,
   busy,
+  needsPassword,
   onSign,
+  onSigned,
   onBroadcast,
   onClose,
 }: {
@@ -698,7 +723,11 @@ function TxDialog({
   chain: Chain
   explorer: string
   busy: boolean
-  onSign: (psbt: Uint8Array) => void
+  /** software wallet: signing asks for its password */
+  needsPassword: boolean
+  onSign: (psbt: Uint8Array, password?: string) => void
+  /** a transaction signed elsewhere, already verified against the reviewed PSBT */
+  onSigned: (signed: Signed) => void
   onBroadcast: (signed: Signed) => void
   onClose: () => void
 }) {
@@ -733,15 +762,16 @@ function TxDialog({
 
         {step.name === "review" && (
           <>
-            <PsbtQr psbt={step.psbt} filename={`${chain}-unsigned.psbt`} />
-            <DialogFooter className="flex-row gap-2">
-              <Button variant="outline" className="flex-1" disabled={busy} onClick={onClose}>
-                Edit
-              </Button>
-              <Button className="flex-1" disabled={busy} onClick={() => onSign(step.psbt)}>
-                {busy ? <Loader2Icon className="animate-spin" /> : <PenLineIcon />} Sign
-              </Button>
-            </DialogFooter>
+            <ReviewStep
+              chain={chain}
+              psbt={step.psbt}
+              fee={step.plan.fee}
+              busy={busy}
+              needsPassword={needsPassword}
+              onSign={onSign}
+              onSigned={onSigned}
+              onEdit={onClose}
+            />
           </>
         )}
 
@@ -776,7 +806,7 @@ function TxDialog({
         {step.name === "sent" && (
           <>
             <div className="flex flex-col items-center gap-3 py-2 text-center">
-              <CheckCircle2Icon className="size-12 text-emerald-400 motion-safe:animate-in motion-safe:zoom-in-50" />
+              <CheckCircle2Icon className="size-12 text-emerald-600 dark:text-emerald-400 motion-safe:animate-in motion-safe:zoom-in-50" />
               <code className="max-w-full font-mono text-xs break-all text-muted-foreground">{step.txid}</code>
             </div>
             <DialogFooter className="flex-row gap-2">
@@ -793,6 +823,125 @@ function TxDialog({
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** Review step: unsigned PSBT out, then sign here (password for software wallets) or bring back a tx signed elsewhere. */
+function ReviewStep({
+  chain,
+  psbt,
+  fee,
+  busy,
+  needsPassword,
+  onSign,
+  onSigned,
+  onEdit,
+}: {
+  chain: Chain
+  psbt: Uint8Array
+  fee: number
+  busy: boolean
+  needsPassword: boolean
+  onSign: (psbt: Uint8Array, password?: string) => void
+  onSigned: (signed: Signed) => void
+  onEdit: () => void
+}) {
+  const [password, setPassword] = useState("")
+  const [external, setExternal] = useState<"scan" | "paste" | null>(null)
+  const [pasted, setPasted] = useState("")
+  const file = useRef<HTMLInputElement>(null)
+  const importFrom = (data: Scanned) => {
+    try {
+      const { hex, txid, vsize } = importSigned(chain, psbt, data)
+      setExternal(null)
+      setPasted("")
+      onSigned({ hex, txid, vsize, fee })
+      toast.success("Signed transaction imported", { description: "Signatures verified against the reviewed transaction." })
+    } catch (e) {
+      toast.error("Can't use that signed transaction", { description: (e as Error).message })
+    }
+  }
+
+  return (
+    <>
+            <PsbtQr psbt={psbt} filename={`${chain}-unsigned.psbt`} />
+
+            <div className="flex flex-col gap-2 rounded-lg border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium">Signed on another device?</span>
+                <div className="flex gap-1">
+                  <Button size="sm" variant={external === "scan" ? "secondary" : "ghost"} onClick={() => setExternal(external === "scan" ? null : "scan")}>
+                    <ScanLineIcon /> Scan
+                  </Button>
+                  <Button size="sm" variant={external === "paste" ? "secondary" : "ghost"} onClick={() => setExternal(external === "paste" ? null : "paste")}>
+                    <ClipboardPasteIcon /> Paste
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => file.current?.click()}>
+                    <UploadIcon /> File
+                  </Button>
+                  <input
+                    ref={file}
+                    type="file"
+                    accept=".psbt,.txn,.txt,application/octet-stream,text/plain"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0]
+                      e.target.value = ""
+                      if (!f) return
+                      const bytes = new Uint8Array(await f.arrayBuffer())
+                      // binary PSBT as-is, otherwise text (base64 PSBT or hex tx)
+                      importFrom(bytes[0] === 0x70 && bytes[4] === 0xff ? bytes : new TextDecoder().decode(bytes))
+                    }}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Bring back the signed PSBT or transaction from your hardware wallet, Sparrow{chain === "xbt" ? " or Bitcoin Knots" : ""}: scan its QR (UR or
+                BBQr), paste it, or load the file. It must match this transaction and carry valid signatures.
+              </p>
+              {external === "scan" && <QrScanner onResult={importFrom} />}
+              {external === "paste" && (
+                <div className="flex flex-col gap-2">
+                  <Textarea
+                    rows={4}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="Signed PSBT (base64) or raw transaction (hex)"
+                    value={pasted}
+                    onChange={(e) => setPasted(e.target.value)}
+                  />
+                  <Button size="sm" disabled={!pasted.trim()} onClick={() => importFrom(pasted)}>
+                    Use signed transaction
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {needsPassword && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="wallet-password" className="text-xs">
+                  Wallet password
+                </Label>
+                <Input
+                  id="wallet-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && password && onSign(psbt, password)}
+                  placeholder="Unlocks this wallet's keys for this signature only"
+                />
+              </div>
+            )}
+            <DialogFooter className="flex-row gap-2">
+              <Button variant="outline" className="flex-1" disabled={busy} onClick={onEdit}>
+                Edit
+              </Button>
+              <Button className="flex-1" disabled={busy || (needsPassword && !password)} onClick={() => onSign(psbt, needsPassword ? password : undefined)}>
+                {busy ? <Loader2Icon className="animate-spin" /> : <PenLineIcon />} Sign here
+              </Button>
+            </DialogFooter>
+    </>
   )
 }
 
@@ -815,7 +964,7 @@ function OpReturnInfo({ message }: { message: string }) {
     error = (e as Error).message
   }
   return (
-    <p className={cn("text-xs", error ? "text-rose-400" : "text-muted-foreground")}>
+    <p className={cn("text-xs", error ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground")}>
       {error ||
         `${bytes} / ${OP_RETURN_MAX_DATA} bytes${bytes < 81 ? `, padded with ${81 - bytes} zero bytes` : ""} · OP_RETURN script ${script} bytes (Blake max 83) · +${script + 9} vB`}
     </p>

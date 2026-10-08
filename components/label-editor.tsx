@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { TagIcon } from "lucide-react"
 import { toast } from "sonner"
+import { useWallet } from "@/components/wallet-provider"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
@@ -20,6 +21,7 @@ export function LabelEditor({
   value?: string
   className?: string
 }) {
+  const { wallet } = useWallet()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value ?? "")
 
@@ -27,7 +29,7 @@ export function LabelEditor({
     setEditing(false)
     if (draft.trim() === (value ?? "")) return
     try {
-      await api("/api/labels", { chain, type, ref: target, label: draft.trim() })
+      await api("/api/labels", { walletId: wallet?.id, chain, type, ref: target, label: draft.trim() })
     } catch (e) {
       toast.error("Couldn't save label", { description: (e as Error).message })
       setDraft(value ?? "")

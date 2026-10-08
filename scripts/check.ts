@@ -1,4 +1,4 @@
-// Run: pnpm check  (react-server condition lets us import the server-only modules)
+// Run: pnpm check  (react-server condition lets us import the server-only modules; uses its own data/check.db)
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import { HDKey } from "@scure/bip32"
@@ -7,8 +7,11 @@ import { RawTx, SigHash, Transaction, p2pkh, p2wpkh } from "@scure/btc-signer"
 import { secp256k1 } from "@noble/curves/secp256k1.js"
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js"
 import { finalizeEvent, generateSecretKey, getPublicKey, nip98 } from "nostr-tools"
-import { deriveAddresses, parseCoins, scriptHash, txEvents, type Snapshot, type Tx } from "../lib/wallet"
-import { buildPsbt, cpfpFee, feeAt, opReturnScript, outputRuleError, planTx, rbfFee, type Coin } from "../lib/tx"
+import { deriveAddresses, normalizeXpub, parseCoins, scriptHash, txEvents, type Snapshot, type Tx } from "../lib/wallet"
+import { db } from "../lib/server/db"
+import { WrongPasswordError, seal, unseal } from "../lib/server/secret"
+import { createSeedWallet, deleteWallet, importWatchWallet, listWallets, signingAccount } from "../lib/server/wallets"
+import { buildPsbt, cpfpFee, feeAt, importSigned, opReturnScript, outputRuleError, planTx, rbfFee, type Coin } from "../lib/tx"
 import { SIGHASH_ALL_UNIFIED, unifiedSighash, type ScriptType } from "../lib/unified-sighash"
 import { requireNostr } from "../lib/server/auth"
 import { headerTime } from "../lib/server/watcher"
@@ -24,6 +27,8 @@ const throws = async (fn: () => unknown, re: RegExp) => {
 }
 
 ;(async () => {
+  if (!process.env.DATABASE_URL?.includes("check.db")) throw new Error("pnpm check must run against data/check.db, never the wallet database")
+
   // --- Keys & addresses: BIP84 test vector -------------------------------------------------
   const mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
   const master = HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic))
@@ -31,6 +36,16 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   const xpub = account.publicExtendedKey
   assert.deepEqual(deriveAddresses(xpub, 2), ["bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"])
   assert.equal(deriveAddresses(xpub, 1, 1)[0], "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el")
+  // BIP84 account zpub → the same key as an xpub
+  assert.equal(normalizeXpub("zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs"), xpub)
+  assert.equal(normalizeXpub(xpub), xpub)
+  await throws(() => normalizeXpub(account.privateExtendedKey), /xpub or zpub/)
+
+  // --- Seed encryption: right password opens it, wrong one fails authentication ----------------
+  const sealed = await seal("abandon … about", "correct horse")
+  assert.equal(await unseal(sealed, "correct horse"), "abandon … about")
+  await assert.rejects(unseal(sealed, "wrong horse"), WrongPasswordError)
+
   assert.equal(scriptHash("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"), "8b01df4e368ea28f8dc0423bcf7a4923e3a12d307c875e47a0cfbf90b5c39161")
   assert.equal(
     headerTime(
@@ -45,7 +60,7 @@ const throws = async (fn: () => unknown, re: RegExp) => {
 
   // --- Incoming-tx events -----------------------------------------------------------------
   const snap = (txs: Tx[], synced = true): Snapshot => ({
-    chain: "btc", connected: true, synced, server: null, height: 100, explorer: "", fees: null, addresses: [], utxos: [], txs,
+    walletId: "w", chain: "btc", connected: true, synced, server: null, height: 100, explorer: "", fees: null, addresses: [], utxos: [], txs,
   })
   const tx = (txid: string, height: number, amount: number): Tx => ({ txid, height, amount, time: null })
   const old = tx("old", 50, 1000)
@@ -169,13 +184,51 @@ const throws = async (fn: () => unknown, re: RegExp) => {
     "…and not against Bitcoin's BIP143 message for the same byte (replay protection)",
   )
 
+  // external signer round trip: a finalized tx, or a PSBT with partial sigs, must match what we built
+  const btcPsbt = psbtFor("btc")
+  const btcSigned = await signWith("btc", btcPsbt, ctx())
+  assert.equal(importSigned("btc", btcPsbt, btcSigned.hex).txid, btcSigned.txid)
+  const partial = Transaction.fromPSBT(btcPsbt)
+  partial.signIdx(account.deriveChild(0).deriveChild(0).privateKey!, 0, [SigHash.ALL]) // signed, not finalized
+  assert.equal(importSigned("btc", btcPsbt, partial.toPSBT()).txid, btcSigned.txid)
+  const otherPlan = planTx({ chain: "btc", recipients: [{ address: dest, amount: 40_000 }], candidates: [fundCoin], fee: feeAt(3), changeAddress: change0 })
+  const otherPsbt = buildPsbt(otherPlan, { chain: "btc", xpub, fingerprint: master.fingerprint, accountPath: "m/84'/0'/0'", tipHeight: 970_001 }).toPSBT()
+  await throws(() => importSigned("btc", otherPsbt, btcSigned.hex), /different transaction/) // other locktime → other tx
+  const xbtPsbt = psbtFor("xbt")
+  const xbtSigned = await signWith("xbt", xbtPsbt, ctx())
+  assert.equal(importSigned("xbt", xbtPsbt, xbtSigned.hex).txid, xbtSigned.txid)
+  const xbtAsBtc = Transaction.fromPSBT(xbtPsbt)
+  xbtAsBtc.updateInput(0, { sighashType: SigHash.ALL }, true) // a signer that ignores UNIFIED
+  xbtAsBtc.signIdx(account.deriveChild(0).deriveChild(0).privateKey!, 0, [SigHash.ALL]) // legacy sig on a Blake tx
+  await throws(() => importSigned("xbt", xbtPsbt, xbtAsBtc.toPSBT()), /SIGHASH_UNIFIED/)
+
   // signer refusals
   await throws(() => signWith("btc", psbtFor("btc"), ctx({ frozen: new Set([`${fundingId}:0`]) })), /frozen/)
   await throws(() => signWith("btc", psbtFor("btc"), ctx({ fingerprint: 0x12345678 })), /not from this wallet/)
   await throws(() => signWith("btc", psbtFor("btc"), ctx({ prevOut: async () => ({ script: p2wpkh(pub0).script, amount: 99_999n }) })), /amount or script/)
   await throws(() => signWith("xbt", psbtFor("btc", new Uint8Array(5)), ctx()), /not allowed on Blake/)
 
+  // --- Wallets: .env default, software (password), watch-only ---------------------------------
+  process.env.SEED_PHRASE = mnemonic
+  process.env.DERIVATION_PATH = "m/84'/0'/0'"
+  const envWallet = (await listWallets()).find((w) => w.id === "env")!
+  assert.equal(envWallet.xpub, xpub)
+  assert.equal((await signingAccount("env")).fingerprint, master.fingerprint)
+  const soft = await createSeedWallet({ name: "check soft", mnemonic, password: "password1" })
+  assert.ok(soft.needsPassword && !soft.watchOnly)
+  await throws(() => signingAccount(soft.id), /password/)
+  await assert.rejects(signingAccount(soft.id, "nope-nope"), WrongPasswordError)
+  assert.deepEqual((await signingAccount(soft.id, "password1")).keyFor(0, 0).publicKey, account.deriveChild(0).deriveChild(0).publicKey)
+  const watch = await importWatchWallet({ name: "check watch", xpub: "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs" })
+  assert.ok(watch.watchOnly && watch.xpub === xpub)
+  await throws(() => signingAccount(watch.id), /watch-only/)
+  await throws(() => deleteWallet("env"), /\.env/)
+  await deleteWallet(soft.id)
+  await deleteWallet(watch.id)
+
   // --- NIP-98: allowlist + payload binding ------------------------------------------------------
+  await db.account.deleteMany()
+  await db.setting.deleteMany({ where: { key: "owner" } })
   const url = "http://localhost:3000/api/stream"
   const allowed = generateSecretKey()
   process.env.ALLOWED_PUBKEYS = getPublicKey(allowed)
@@ -190,6 +243,13 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   assert.equal(await requireNostr(req(posted, "POST"), body), null)
   assert.equal((await requireNostr(req(posted, "POST"), { ...body, hex: "01" }))?.status, 401, "tampered body rejected")
   assert.equal((await requireNostr(req(await tokenFor(allowed, url, "POST"), "POST"), body))?.status, 401, "POST without payload tag rejected")
+
+  // no allowlist anywhere: the first login claims the app, later strangers are refused
+  process.env.ALLOWED_PUBKEYS = ""
+  const first = generateSecretKey()
+  assert.equal(await requireNostr(req(await tokenFor(first))), null, "first login claims")
+  assert.equal((await requireNostr(req(await tokenFor(generateSecretKey()))))?.status, 403, "second key refused")
+  assert.equal(await requireNostr(req(await tokenFor(first))), null, "owner still allowed")
 
   console.log("all checks passed")
 })().catch((e) => {

@@ -1,10 +1,13 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
 import { republish, setLabel } from "@/lib/server/labels"
+import { getWallet } from "@/lib/server/wallets"
 
-/** POST {chain, jsonl} — import BIP-329 records (tx, addr, output; other types are skipped). */
+/** POST {walletId, chain, jsonl} — import BIP-329 records (tx, addr, output; other types are skipped). */
 export async function POST(req: Request) {
-  const body = await authorizedJson<{ chain?: unknown; jsonl?: unknown }>(req)
+  const body = await authorizedJson<{ walletId?: unknown; chain?: unknown; jsonl?: unknown }>(req)
   if (body instanceof Response) return body
+  const wallet = await getWallet(body.walletId).catch(() => null)
+  if (!wallet) return Response.json({ error: "Unknown wallet" }, { status: 400 })
   if (!isChain(body.chain) || typeof body.jsonl !== "string" || body.jsonl.length > 5_000_000)
     return Response.json({ error: "Invalid request" }, { status: 400 })
   let imported = 0
@@ -25,12 +28,12 @@ export async function POST(req: Request) {
         skipped++
         continue
       }
-      await setLabel(type === "addr" ? "all" : body.chain, type, ref, label, spendable)
+      await setLabel(wallet.id, type === "addr" ? "all" : body.chain, type, ref, label, spendable)
       imported++
     } catch {
       skipped++
     }
   }
-  await republish()
+  await republish(wallet.id)
   return Response.json({ imported, skipped })
 }

@@ -10,18 +10,44 @@ datasource db {
   provider = "sqlite"
 }
 
-/// Addresses derived from the account xpub (identical on both chains).
+/// A wallet: the .env seed (kind "env"), a software wallet created/imported in the app ("seed"),
+/// or a watch-only xpub ("watch"). Software seeds are stored encrypted with the wallet's password.
+model Wallet {
+  id          String   @id
+  name        String
+  kind        String // env | seed | watch
+  xpub        String
+  path        String
+  fingerprint Int
+  /// seed wallets: scrypt + AES-256-GCM sealed JSON {mnemonic, passphrase}
+  encSeed     String?
+  /// a BIP39 passphrase is part of this wallet (shown in the UI, never stored in clear)
+  passphrase  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+/// Nostr pubkeys allowed to log in (besides ALLOWED_PUBKEYS). With neither, the first login claims ownership.
+model Account {
+  pubkey    String   @id
+  createdAt DateTime @default(now())
+}
+
+/// Addresses derived from a wallet's account xpub (identical on both chains).
 model Address {
-  address    String @id
+  walletId   String
+  address    String
   change     Int // 0 = receive, 1 = change
   index      Int
-  scripthash String @unique
+  scripthash String
 
-  @@unique([change, index])
+  @@id([walletId, address])
+  @@unique([walletId, scripthash])
+  @@unique([walletId, change, index])
 }
 
 /// Per-chain sync state of an address. `status` is the Electrum status hash: unchanged => skip resync.
 model AddressState {
+  walletId    String
   chain       String
   address     String
   status      String?
@@ -31,34 +57,36 @@ model AddressState {
   /// JSON [[txid, height], ...] from the last get_history: lets us GC replaced/evicted txs without refetching everything
   history     String  @default("[]")
 
-  @@id([chain, address])
-  @@index([chain, used])
+  @@id([walletId, chain, address])
+  @@index([walletId, chain, used])
 }
 
 model Utxo {
-  chain   String
-  txid    String
-  vout    Int
-  address String
-  value   BigInt
-  height  Int // <= 0 while unconfirmed
+  walletId String
+  chain    String
+  txid     String
+  vout     Int
+  address  String
+  value    BigInt
+  height   Int // <= 0 while unconfirmed
 
-  @@id([chain, txid, vout])
-  @@index([chain, address])
+  @@id([walletId, chain, txid, vout])
+  @@index([walletId, chain, address])
 }
 
 /// Wallet transactions (net effect on our addresses).
 model Tx {
-  chain  String
-  txid   String
-  height Int
-  time   Int?
-  amount BigInt
-  fee    BigInt?
-  vsize  Int?
+  walletId String
+  chain    String
+  txid     String
+  height   Int
+  time     Int?
+  amount   BigInt
+  fee      BigInt?
+  vsize    Int?
 
-  @@id([chain, txid])
-  @@index([chain, height])
+  @@id([walletId, chain, txid])
+  @@index([walletId, chain, height])
 }
 
 /// Immutable raw transaction cache (wallet txs and their parents).
@@ -81,13 +109,14 @@ model Header {
 
 /// BIP-329 style labels. type: tx | addr | output (ref "txid:vout"). spendable=false => frozen.
 model Label {
+  walletId  String
   chain     String
   type      String
   ref       String
   label     String?
   spendable Boolean?
 
-  @@id([chain, type, ref])
+  @@id([walletId, chain, type, ref])
 }
 
 model Setting {

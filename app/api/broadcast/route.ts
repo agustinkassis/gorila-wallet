@@ -1,5 +1,6 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
-import { ExtensionDisabledError, parseTx, watcherFor } from "@/lib/server/watcher"
+import { broadcastHex } from "@/lib/server/broadcast"
+import { ExtensionDisabledError, chainFor, parseTx } from "@/lib/server/watcher"
 import { SIGHASH_UNIFIED } from "@/lib/unified-sighash"
 
 /**
@@ -27,26 +28,14 @@ export async function POST(req: Request) {
 
   let watcher
   try {
-    watcher = await watcherFor(body.chain)
+    watcher = await chainFor(body.chain)
   } catch (e) {
     if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
     throw e
   }
   try {
-    const res = await fetch(`${watcher.mempool}/api/tx`, {
-      method: "POST",
-      body: body.hex,
-      headers: { "Content-Type": "text/plain" },
-      signal: AbortSignal.timeout(20_000),
-    })
-    const text = (await res.text()).trim()
-    if (res.ok) return Response.json({ txid: text })
-    if (res.status >= 400 && res.status < 500) return Response.json({ error: text || "Rejected by the network" }, { status: 422 })
-  } catch {}
-  try {
-    const txid = await watcher.client.request<string>("blockchain.transaction.broadcast", [body.hex])
-    return Response.json({ txid })
+    return Response.json({ txid: await broadcastHex(watcher, body.hex) })
   } catch (e) {
-    return Response.json({ error: (e as Error).message || "Broadcast failed" }, { status: 422 })
+    return Response.json({ error: (e as Error).message }, { status: 422 })
   }
 }

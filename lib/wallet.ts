@@ -1,13 +1,14 @@
 import { HDKey } from "@scure/bip32"
 import { Address, NETWORK, OutScript, p2wpkh } from "@scure/btc-signer"
 import { sha256 } from "@noble/hashes/sha2.js"
-import { bytesToHex } from "@noble/hashes/utils.js"
+import { bytesToHex, concatBytes } from "@noble/hashes/utils.js"
+import { createBase58check } from "@scure/base"
 
 export type Chain = "btc" | "xbt"
 
 export const CHAINS: Record<Chain, { label: string; unit: string; text: string; bg: string }> = {
-  btc: { label: "Bitcoin", unit: "BTC", text: "text-orange-400", bg: "bg-orange-500" },
-  xbt: { label: "Blake", unit: "XBT", text: "text-violet-400", bg: "bg-violet-500" },
+  btc: { label: "Bitcoin", unit: "BTC", text: "text-orange-600 dark:text-orange-400", bg: "bg-orange-500" },
+  xbt: { label: "Blake", unit: "XBT", text: "text-violet-600 dark:text-violet-400", bg: "bg-violet-500" },
 }
 export const CHAIN_IDS = Object.keys(CHAINS) as Chain[]
 
@@ -27,7 +28,23 @@ export type Utxo = { txid: string; vout: number; address: string; value: number;
 export type Tx = { txid: string; height: number; time: number | null; amount: number; fee?: number | null; vsize?: number | null; label?: string }
 export type Fees = { fastestFee: number; halfHourFee: number; hourFee: number; economyFee: number; minimumFee: number }
 
+/** env: the .env seed · seed: software wallet (encrypted, password to sign) · watch: xpub only */
+export type WalletKind = "env" | "seed" | "watch"
+export type WalletInfo = {
+  id: string
+  name: string
+  kind: WalletKind
+  xpub: string
+  path: string
+  fingerprint: number
+  watchOnly: boolean
+  /** signing asks for this wallet's password */
+  needsPassword: boolean
+  passphrase: boolean
+}
+
 export type Snapshot = {
+  walletId: string
   chain: Chain
   connected: boolean
   /** true once balances come from a completed sync (now or a previous run, via the local DB) */
@@ -66,9 +83,30 @@ export const DEFAULT_SETTINGS: Settings = {
 }
 
 export type StreamMessage =
-  | { type: "init"; xpub: string; path: string; fingerprint: number }
+  | { type: "wallets"; wallets: WalletInfo[] }
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "settings"; settings: Settings }
+
+const base58check = createBase58check(sha256)
+const XPUB = Uint8Array.of(0x04, 0x88, 0xb2, 0x1e)
+const ZPUB = Uint8Array.of(0x04, 0xb2, 0x47, 0x46)
+
+/**
+ * Accept an account-level xpub or zpub (BIP84 native SegWit) and return it as an xpub.
+ * Throws on anything else (private keys, other script types, testnet, bad checksum).
+ */
+export function normalizeXpub(input: string) {
+  const raw = base58check.decode(input.trim())
+  if (raw.length !== 78) throw new Error("Not an extended public key")
+  const version = raw.slice(0, 4)
+  const same = (a: Uint8Array, b: Uint8Array) => a.every((x, i) => x === b[i])
+  if (!same(version, XPUB) && !same(version, ZPUB)) throw new Error("Use an xpub or zpub (native SegWit, mainnet)")
+  const xpub = base58check.encode(concatBytes(XPUB, raw.slice(4)))
+  HDKey.fromExtendedKey(xpub) // validates the key itself
+  return xpub
+}
+
+export const DERIVATION_PATH = /^m(\/\d+'?)+$/
 
 export function deriveAddress(xpub: string, change: 0 | 1, index: number) {
   const key = HDKey.fromExtendedKey(xpub).deriveChild(change).deriveChild(index)

@@ -1,22 +1,22 @@
 import "server-only"
 import { db } from "@/lib/server/db"
-import { getAccount, privateKeyFor } from "@/lib/server/keys"
 import { signWith } from "@/lib/server/sign-core"
-import { watcherFor } from "@/lib/server/watcher"
+import { chainFor } from "@/lib/server/watcher"
+import { signingAccount } from "@/lib/server/wallets"
 import type { Chain } from "@/lib/wallet"
 
 export { SignError } from "@/lib/server/sign-core"
 
-/** Sign with the wallet seed; prevouts come from the chain (SQLite raw-tx cache / Electrum), frozen coins from labels. */
-export async function signPsbt(chain: Chain, psbt: Uint8Array) {
-  const { fingerprint, path } = getAccount()
-  const watcher = await watcherFor(chain)
-  const frozen = await db.label.findMany({ where: { chain, type: "output", spendable: false }, select: { ref: true } })
+/**
+ * Sign with a wallet's keys (env seed, or a software seed unlocked by its password for this call only).
+ * Prevouts come from the chain (SQLite raw-tx cache / Electrum), frozen coins from the wallet's labels.
+ */
+export async function signPsbt(walletId: string, chain: Chain, psbt: Uint8Array, password?: unknown) {
+  const [acct, client] = await Promise.all([signingAccount(walletId, password), chainFor(chain)])
+  const frozen = await db.label.findMany({ where: { walletId, chain, type: "output", spendable: false }, select: { ref: true } })
   return signWith(chain, psbt, {
-    fingerprint,
-    accountPath: path,
-    keyFor: privateKeyFor,
-    prevOut: async (txid, vout) => (await watcher.getTx(txid)).getOutput(vout),
+    ...acct,
+    prevOut: async (txid, vout) => (await client.getTx(txid)).getOutput(vout),
     frozen: new Set(frozen.map((l) => l.ref)),
   })
 }
