@@ -35,10 +35,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { PsbtQr, QrImage } from "@/components/qr"
 import { QrScanner, type Scanned } from "@/components/qr-scanner"
+import { minDataScript } from "@/lib/chains"
+import { RecipientAddress } from "@/components/recipient-address"
 import { WatchOnlyBadge } from "@/components/wallet-switcher"
 import { copy, shorten } from "@/components/site-header"
 import { useWallet } from "@/components/wallet-provider"
@@ -60,7 +61,20 @@ import {
   type FeePolicy,
   type TxPlan,
 } from "@/lib/tx"
-import { CHAINS, formatCoins, hasData, nextUnused, parseCoins, sharedOutpoints, type Chain, type FeePreset, type Snapshot } from "@/lib/wallet"
+import { UnitLabel, readUnit, useUnit } from "@/components/units"
+import {
+  CHAINS,
+  amountInput,
+  amountText,
+  formatAmount,
+  hasData,
+  nextUnused,
+  parseAmount,
+  sharedOutpoints,
+  type Chain,
+  type FeePreset,
+  type Snapshot,
+} from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 const PRESETS: { key: FeePreset; label: string }[] = [
@@ -102,8 +116,8 @@ function Send() {
     : params.get("cpfp")
       ? { kind: "cpfp", outpoint: params.get("cpfp")! }
       : { kind: "send" }
-  // chain lives in the URL so links like /send?chain=xbt work even when this page is already mounted
-  const chain: Chain = params.get("chain") === "xbt" && wallet.chains.includes("xbt") ? "xbt" : "btc"
+  // the selected network (navbar); its replay pair only informs the replay guard
+  const chain = wallet.chain
   const snap = wallet.snapshots[chain]
 
   if (wallet.watchOnly)
@@ -125,18 +139,7 @@ function Send() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {mode.kind === "send" && wallet.chains.length > 1 ? (
-          <Tabs value={chain} onValueChange={(v) => router.replace(`/send?chain=${v}`)}>
-            <TabsList>
-              {wallet.chains.map((c) => (
-                <TabsTrigger key={c} value={c} className="gap-2">
-                  <span className={cn("size-2 rounded-full", CHAINS[c].bg)} />
-                  {CHAINS[c].label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        ) : mode.kind === "send" ? (
+        {mode.kind === "send" ? (
           <span />
         ) : (
           <Button variant="ghost" size="sm" onClick={() => router.push("/send")}>
@@ -161,17 +164,28 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
   // a replacement can't spend outputs of the tx it replaces: hide them in bump mode
   const replacing = mode.kind === "bump" ? mode.txid : null
   const coins = useMemo(() => coinsOf(snap).filter((c) => c.coin.txid !== replacing), [snap, replacing])
-  const shared = useMemo(() => sharedOutpoints(wallet.snapshots), [wallet.snapshots])
+  const shared = useMemo(() => sharedOutpoints(wallet.snapshots, chain), [wallet.snapshots, chain])
   const changeAddress = (nextUnused(wallet.snapshots, 1) ?? snap.addresses.find((a) => a.change === 1))?.address ?? ""
 
   const [recipients, setRecipients] = useState([{ address: "", amount: "" }])
+  // Amounts are typed in the display unit; when the switch flips, re-express what's typed so it keeps its value.
+  const unit = useUnit()
+  const [typedIn, setTypedIn] = useState(unit)
+  if (typedIn !== unit) {
+    setTypedIn(unit)
+    setRecipients(recipients.map((r) => {
+      const sats = parseAmount(r.amount, typedIn)
+      return sats === null ? r : { ...r, amount: amountInput(sats, unit) }
+    }))
+  }
   const [sendMax, setSendMax] = useState(false)
   const [manual, setManual] = useState<Set<string> | null>(preselect ? new Set(preselect.split(",")) : null)
   const [preset, setPreset] = useState<FeePreset | "custom">(wallet.settings.feePreset)
   const [customRate, setCustomRate] = useState("")
-  // the Bitcoin-only OP_RETURN replay guard belongs to the Blake2b extension
-  const blakeOn = wallet.chains.includes("xbt")
-  const [guard, setGuard] = useState(chain === "btc" && blakeOn && wallet.settings.replayGuard)
+  // replay guard: an OP_RETURN too big for the replay pair (Bitcoin ≥ 84 bytes, Blake allows ≤ 83) pins the tx here
+  const pair = wallet.pair
+  const guardable = !!pair && minDataScript(chain) > 0
+  const [guard, setGuard] = useState(guardable && wallet.settings.replayGuard)
   const [message, setMessage] = useState("")
   const [step, setStep] = useState<Step>({ name: "edit" })
   const [busy, setBusy] = useState(false)
@@ -195,7 +209,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
       const inputs = ins.map((i) => {
         const txid = toHex(i.txid!)
         const out = parseTxHex(parents[txid]).getOutput(i.index!)
-        const address = addressFor(out.script!)
+        const address = addressFor(out.script!, chain)
         const a = address ? pos.get(address) : undefined
         if (!a) throw new Error("Only transactions spending this wallet's coins can be bumped")
         return { txid, vout: i.index!, value: Number(out.amount), address: a.address, change: a.change, index: a.index, height: 0 } as Coin
@@ -206,14 +220,14 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
         const o = tx.getOutput(i)
         if (o.script![0] === 0x6a) data = Script.decode(o.script!)[1] as Uint8Array
         else {
-          const address = addressFor(o.script!)!
+          const address = addressFor(o.script!, chain)!
           if (pos.get(address)?.change !== 1) outs.push({ address, amount: Number(o.amount) }) // change is recomputed
         }
       }
       if (!live) return
       setBump({ inputs, recipients: outs, data, fee: original.fee, vsize: original.vsize })
       // the replacement starts as a copy of the original; recipients stay editable (amounts, Max, more recipients)
-      if (outs.length) setRecipients(outs.map((r) => ({ address: r.address, amount: formatCoins(r.amount) })))
+      if (outs.length) setRecipients(outs.map((r) => ({ address: r.address, amount: amountInput(r.amount, readUnit()) })))
     })().catch((e) => live && setLoadError((e as Error).message))
     return () => {
       live = false
@@ -242,7 +256,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
   const locked = mode.kind === "bump" ? (bump?.inputs ?? []) : []
   const lockedOps = new Set(locked.map(outpoint))
 
-  const data = guard && blakeOn && chain === "btc" ? utf8ToBytes(message) : undefined
+  const data = guard && guardable ? utf8ToBytes(message) : undefined
 
   let plan: TxPlan | null = null
   let planError: string | null = loadError
@@ -254,7 +268,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
         plan = planTx({ chain, recipients: [{ address: changeAddress, amount: 0 }], sendMax: true, required: [cpfpCoin], fee: policy, changeAddress })
       } else if (mode.kind === "send" || bump) {
         const list = recipients.map((r, i) => {
-          const amount = sendMax && i === 0 ? 0 : parseCoins(r.amount)
+          const amount = sendMax && i === 0 ? 0 : parseAmount(r.amount, unit)
           if (amount === null) throw new PlanError("Enter a valid amount")
           return { address: r.address, amount }
         })
@@ -354,25 +368,24 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
             <CardContent className="flex flex-col gap-3">
               {recipients.map((r, i) => (
                 <div key={i} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_180px_auto]">
-                  <Input
+                  <RecipientAddress
+                    chain={chain}
+                    index={i}
                     disabled={!editable}
-                    placeholder="bc1… address"
                     value={r.address}
-                    onChange={(e) => setRecipients(recipients.map((x, j) => (j === i ? { ...x, address: e.target.value } : x)))}
-                    className="font-mono text-xs"
-                    aria-label={`Recipient ${i + 1} address`}
+                    onChange={(address) => setRecipients(recipients.map((x, j) => (j === i ? { ...x, address } : x)))}
                   />
                   <div className="relative">
                     <Input
                       disabled={!editable || (sendMax && i === 0)}
-                      inputMode="decimal"
-                      placeholder={sendMax && i === 0 ? "Max" : "0.00000000"}
-                      value={sendMax && i === 0 ? (plan ? formatCoins(plan.outputs.find((o) => o.kind === "recipient")?.amount ?? 0) : "") : r.amount}
+                      inputMode={unit === "sats" ? "numeric" : "decimal"}
+                      placeholder={sendMax && i === 0 ? "Max" : unit === "sats" ? "0" : "0.00000000"}
+                      value={sendMax && i === 0 ? (plan ? amountInput(plan.outputs.find((o) => o.kind === "recipient")?.amount ?? 0, unit) : "") : r.amount}
                       onChange={(e) => setRecipients(recipients.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))}
                       className="pr-12 font-mono text-xs"
                       aria-label={`Recipient ${i + 1} amount`}
                     />
-                    <span className={cn("absolute top-1/2 right-3 -translate-y-1/2 text-xs", meta.text)}>{meta.unit}</span>
+                    <UnitLabel chain={chain} className={cn("absolute top-1/2 right-3 -translate-y-1/2 text-xs", meta.text)} />
                   </div>
                   <div className="flex gap-1">
                     {recipients.length === 1 ? (
@@ -501,7 +514,7 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
                       </div>
                       <div className="truncate text-xs text-muted-foreground">{label ?? `${coin.change ? "change" : "receive"} #${coin.index}`}</div>
                     </div>
-                    <span className="font-mono text-xs tabular-nums">{formatCoins(coin.value)}</span>
+                    <span className="font-mono text-xs tabular-nums">{formatAmount(coin.value, unit)}</span>
                   </label>
                 )
               })}
@@ -509,19 +522,19 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
           </Card>
         )}
 
-        {chain === "btc" && mode.kind === "send" && blakeOn && (
+        {guardable && mode.kind === "send" && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-2">
-                  <ShieldCheckIcon className="size-4 text-orange-600 dark:text-orange-400" /> Bitcoin-only OP_RETURN
+                  <ShieldCheckIcon className={cn("size-4", meta.text)} /> {meta.label}-only OP_RETURN
                 </span>
-                <Switch checked={guard} disabled={!editable} onCheckedChange={setGuard} aria-label="Bitcoin-only OP_RETURN" />
+                <Switch checked={guard} disabled={!editable} onCheckedChange={setGuard} aria-label={`${meta.label}-only OP_RETURN`} />
               </CardTitle>
               <CardDescription>
-                Adds an on-chain message as an OP_RETURN of at least 84 bytes. Blake&apos;s consensus rejects OP_RETURNs over 83 bytes, so this transaction can
-                only ever confirm on Bitcoin and can&apos;t be replayed to move your Blake coins. Needs Bitcoin Core 30+ relay (mempool.space accepts it).
-                Blake&apos;s data limit lifts on 1 Sep 2027.
+                Adds an on-chain message as an OP_RETURN of at least {minDataScript(chain)} bytes. {CHAINS[pair!].label}&apos;s consensus rejects
+                OP_RETURNs over {minDataScript(chain) - 1} bytes, so this transaction can only ever confirm on {meta.label} and can&apos;t be replayed to move
+                your {CHAINS[pair!].label} coins. Needs a relay that accepts large OP_RETURNs (Bitcoin Core 30+, mempool.space).
               </CardDescription>
             </CardHeader>
             {guard && (
@@ -530,10 +543,10 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
                   disabled={!editable}
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  placeholder="Message to write on Bitcoin (optional, padded to 81+ bytes)"
+                  placeholder={`Message to write on ${meta.label} (optional, padded to ${minDataScript(chain) - 3}+ bytes)`}
                   rows={3}
                 />
-                <OpReturnInfo message={message} />
+                <OpReturnInfo message={message} chain={chain} />
               </CardContent>
             )}
           </Card>
@@ -596,13 +609,13 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
           <CardContent className="flex flex-col gap-2 text-sm">
             {plan ? (
               <>
-                <Row label="Inputs" value={`${plan.inputs.length} coin${plan.inputs.length === 1 ? "" : "s"} · ${formatCoins(plan.inputs.reduce((s, c) => s + c.value, 0))}`} />
-                {mode.kind !== "cpfp" && <Row label="Sending" value={`${formatCoins(sending)} ${meta.unit}`} />}
+                <Row label="Inputs" value={`${plan.inputs.length} coin${plan.inputs.length === 1 ? "" : "s"} · ${formatAmount(plan.inputs.reduce((s, c) => s + c.value, 0), unit)}`} />
+                {mode.kind !== "cpfp" && <Row label="Sending" value={amountText(sending, chain, unit)} />}
                 <Row
                   label="Change"
                   value={(() => {
                     const ch = plan.outputs.find((o) => o.kind === "change")
-                    return ch ? `${formatCoins(ch.amount)} → change #${snap.addresses.find((a) => a.address === ch.address)?.index ?? "?"}` : "none (changeless)"
+                    return ch ? `${formatAmount(ch.amount, unit)} → change #${snap.addresses.find((a) => a.address === ch.address)?.index ?? "?"}` : "none (changeless)"
                   })()}
                 />
                 <Row label="Size" value={`~${plan.vsize} vB`} />
@@ -641,24 +654,26 @@ function SendForm({ chain, snap, mode, preselect }: { chain: Chain; snap: Snapsh
           </CardContent>
         </Card>
 
-        {chain === "xbt" ? (
+        {meta.unifiedSighash ? (
           <Alert>
-            <ShieldCheckIcon className="text-violet-600 dark:text-violet-400" />
+            <ShieldCheckIcon className={meta.text} />
             <AlertTitle>Replay-protected</AlertTitle>
             <AlertDescription>
-              Signed with SIGHASH_UNIFIED (0x21), which Bitcoin rejects, so this only moves Blake coins. External signers need Bitcoin Knots 29.4.1+.
+              Signed with SIGHASH_UNIFIED (0x21), which {pair ? CHAINS[pair].label : "other chains"} rejects, so this only moves {meta.label} coins.
+              External signers need SIGHASH_UNIFIED support (Bitcoin Knots 29.4.1+).
             </AlertDescription>
           </Alert>
         ) : (
+          pair &&
           spendsShared &&
           !guard &&
           !(mode.kind === "bump" && bump?.data) && (
             <Alert className="border-amber-500/40">
               <AlertTriangleIcon className="text-amber-600 dark:text-amber-400" />
-              <AlertTitle>Replayable on Blake</AlertTitle>
+              <AlertTitle>Replayable on {CHAINS[pair].label}</AlertTitle>
               <AlertDescription>
-                These coins also exist on Blake. Anyone can rebroadcast this transaction there and move your Blake coins too. Turn on the Bitcoin-only
-                OP_RETURN, or move the Blake coins first.
+                These coins also exist on {CHAINS[pair].label}. Anyone can rebroadcast this transaction there and move your {CHAINS[pair].label} coins
+                too.{guardable ? ` Turn on the ${meta.label}-only OP_RETURN, or move the ${CHAINS[pair].label} coins first.` : ""}
               </AlertDescription>
             </Alert>
           )
@@ -731,6 +746,7 @@ function TxDialog({
   onBroadcast: (signed: Signed) => void
   onClose: () => void
 }) {
+  const unit = useUnit()
   const meta = CHAINS[chain]
   // Keep a signed-but-unsent tx (or an in-flight request) from being dismissed by a stray click or Escape.
   const guarded = busy || step.name === "signed"
@@ -751,9 +767,11 @@ function TxDialog({
           </DialogTitle>
           <DialogDescription>
             {step.name === "review" &&
-              `${step.plan.inputs.length} input${step.plan.inputs.length === 1 ? "" : "s"} · ${formatCoins(
+              `${step.plan.inputs.length} input${step.plan.inputs.length === 1 ? "" : "s"} · ${amountText(
                 step.plan.outputs.filter((o) => o.kind === "recipient").reduce((s, o) => s + o.amount, 0),
-              )} ${meta.unit} · fee ${step.plan.fee.toLocaleString()} sats (${(step.plan.fee / step.plan.vsize).toFixed(1)} sat/vB). Scan with a signing wallet, or let this wallet's backend sign it.`}
+                chain,
+                unit,
+              )} · fee ${step.plan.fee.toLocaleString()} sats (${(step.plan.fee / step.plan.vsize).toFixed(1)} sat/vB). Scan with a signing wallet, or let this wallet's backend sign it.`}
             {step.name === "signed" &&
               `${step.signed.vsize} vB · fee ${step.signed.fee.toLocaleString()} sats · txid ${shorten(step.signed.txid)}. Nothing is sent until you broadcast.`}
             {step.name === "sent" && "The network accepted the transaction. It will confirm in an upcoming block."}
@@ -896,7 +914,7 @@ function ReviewStep({
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                Bring back the signed PSBT or transaction from your hardware wallet, Sparrow{chain === "xbt" ? " or Bitcoin Knots" : ""}: scan its QR (UR or
+                Bring back the signed PSBT or transaction from your hardware wallet, Sparrow{CHAINS[chain].unifiedSighash ? " or Bitcoin Knots" : ""}: scan its QR (UR or
                 BBQr), paste it, or load the file. It must match this transaction and carry valid signatures.
               </p>
               {external === "scan" && <QrScanner onResult={importFrom} />}
@@ -954,19 +972,20 @@ function Row({ label, value, className }: { label: string; value: string; classN
   )
 }
 
-function OpReturnInfo({ message }: { message: string }) {
+function OpReturnInfo({ message, chain }: { message: string; chain: Chain }) {
   const bytes = utf8ToBytes(message).length
+  const pad = minDataScript(chain) - 3
   let script = 0
   let error = ""
   try {
-    script = opReturnScript(utf8ToBytes(message)).length
+    script = opReturnScript(utf8ToBytes(message), chain).length
   } catch (e) {
     error = (e as Error).message
   }
   return (
     <p className={cn("text-xs", error ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground")}>
       {error ||
-        `${bytes} / ${OP_RETURN_MAX_DATA} bytes${bytes < 81 ? `, padded with ${81 - bytes} zero bytes` : ""} · OP_RETURN script ${script} bytes (Blake max 83) · +${script + 9} vB`}
+        `${bytes} / ${OP_RETURN_MAX_DATA} bytes${bytes < pad ? `, padded with ${pad - bytes} zero bytes` : ""} · OP_RETURN script ${script} bytes (${CHAINS[CHAINS[chain].replayPair!].label} max ${pad + 2}) · +${script + 9} vB`}
     </p>
   )
 }

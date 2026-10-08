@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
 import { ThemeProvider } from "next-themes"
-import { Geist, Geist_Mono } from "next/font/google"
+import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google"
 import { AppSidebar } from "@/components/app-sidebar"
 import { Gate } from "@/components/gate"
 import { NostrProvider } from "@/components/nostr-provider"
@@ -13,6 +13,7 @@ import "./globals.css"
 
 const geistSans = Geist({ variable: "--font-sans", subsets: ["latin"] })
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] })
+const display = Bricolage_Grotesque({ variable: "--font-display", subsets: ["latin"] })
 
 export const metadata: Metadata = {
   title: "Gorilla Wallet",
@@ -21,7 +22,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`} suppressHydrationWarning>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${display.variable} h-full antialiased`} suppressHydrationWarning>
       <body className="min-h-full">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
         <TooltipProvider>
@@ -29,7 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <WalletProvider>
               <SidebarProvider>
                 <AppSidebar />
-                <SidebarInset className="min-w-0">
+                <SidebarInset className="min-w-0 bg-transparent md:bg-background/40 md:shadow-glass md:ring-1 md:ring-border md:backdrop-blur-2xl">
                   <SiteHeader />
                   <main className="flex flex-1 flex-col gap-6 p-4 md:p-6">
                     <Gate>{children}</Gate>

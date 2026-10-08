@@ -2,7 +2,7 @@ import { base64 } from "@scure/base"
 import { authorizedJson, isChain } from "@/lib/server/auth"
 import { SignError, signPsbt } from "@/lib/server/signer"
 import { WrongPasswordError } from "@/lib/server/secret"
-import { ExtensionDisabledError } from "@/lib/server/watcher"
+import { ChainInactiveError } from "@/lib/server/watcher"
 import { WalletError } from "@/lib/server/wallets"
 import { PlanError } from "@/lib/tx"
 
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   try {
     return Response.json(await signPsbt(body.walletId, body.chain, base64.decode(body.psbt), body.password))
   } catch (e) {
-    if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
+    if (e instanceof ChainInactiveError) return Response.json({ error: e.message }, { status: 409 })
     if (e instanceof SignError || e instanceof PlanError || e instanceof WalletError || e instanceof WrongPasswordError) return Response.json({ error: e.message }, { status: 422 })
     return Response.json({ error: "Signing failed" }, { status: 500 })
   }

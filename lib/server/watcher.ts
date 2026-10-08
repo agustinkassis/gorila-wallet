@@ -7,7 +7,8 @@ import { Electrum } from "@/lib/server/electrum"
 import { getSettings } from "@/lib/server/settings"
 import { listWallets } from "@/lib/server/wallets"
 import { parseTxHex as parseTx } from "@/lib/tx"
-import { addressScript, deriveAddress, scriptHash, type Chain, type Fees, type Snapshot, type WalletInfo } from "@/lib/wallet"
+import { CHAINS, CHAIN_IDS, syncedChains, type Chain, type Family } from "@/lib/chains"
+import { addressScript, deriveAddress, scriptHash, type Account, type Fees, type Snapshot, type WalletInfo } from "@/lib/wallet"
 
 type Listener = (s: Snapshot) => void
 type HistoryItem = { tx_hash: string; height: number }
@@ -35,11 +36,18 @@ class ChainClient {
   private timeCache = new Map<number, Promise<number>>()
   private feeTimer?: NodeJS.Timeout
 
+  readonly family: Family
+  /** sources this client was started with: a change in Settings restarts it */
+  readonly key: string
+
   constructor(
     readonly chain: Chain,
     urls: string[],
-    readonly mempool: string,
+    /** mempool.space-compatible APIs, tried in order; the first one is the explorer */
+    readonly mempool: string[],
   ) {
+    this.family = CHAINS[chain].family
+    this.key = JSON.stringify([urls, mempool])
     this.client = new Electrum(urls, {
       onConnect: () => {
         this.routes.clear() // subscriptions belong to the old connection
@@ -54,7 +62,9 @@ class ChainClient {
       onDisconnect: () => this.syncs.forEach((s) => s.refreshMeta()),
       onNotify: (method, params) => {
         if (method === "blockchain.headers.subscribe") {
-          this.height = (params[0] as { height: number }).height
+          const tip = params[0] as { height?: unknown } | undefined
+          if (typeof tip?.height !== "number") return // malformed notification: servers are untrusted
+          this.height = tip.height
           this.syncs.forEach((s) => s.refreshMeta())
         } else if (method === "blockchain.scripthash.subscribe") {
           this.routes.get(params[0] as string)?.forEach((s) => s.markDirty(params[0] as string, params[1] as string | null))
@@ -126,13 +136,16 @@ class ChainClient {
     return p
   }
 
-  /** mempool fee estimates; Electrum estimatefee as a fallback. */
+  /** mempool fee estimates (each source in turn); Electrum estimatefee as a fallback. */
   private async pollFees() {
     let fees: Fees | null = null
-    try {
-      const res = await fetch(`${this.mempool}/api/v1/fees/recommended`, { signal: AbortSignal.timeout(10_000) })
-      if (res.ok) fees = await res.json()
-    } catch {}
+    for (const base of this.mempool) {
+      try {
+        const res = await fetch(`${base}/api/v1/fees/recommended`, { signal: AbortSignal.timeout(10_000) })
+        if (res.ok) fees = await res.json()
+      } catch {}
+      if (fees) break
+    }
     if (!fees && this.client.connected) {
       try {
         const est = await Promise.all([1, 3, 6, 25, 144].map((n) => this.client.request<number>("blockchain.estimatefee", [n])))
@@ -148,7 +161,8 @@ class ChainClient {
 }
 
 /**
- * One wallet on one chain. Electrum is the source of truth; SQLite is the warm, indexed cache.
+ * One wallet on one chain, through its account on the chain's family. Electrum is the source of truth; SQLite is the
+ * warm, indexed cache.
  * Electrum-style: subscribe every address, compare its status hash with the stored one, and only
  * resync addresses whose status changed. Gap-limit discovery on the receive and change branches.
  */
@@ -165,10 +179,13 @@ class WalletSync {
   private stopped = false
   private debounce?: NodeJS.Timeout
 
+  readonly account: Account
+
   constructor(
     readonly wallet: WalletInfo,
     readonly chain: ChainClient,
   ) {
+    this.account = wallet.accounts[chain.family]!
     this.snapshot = {
       walletId: wallet.id,
       chain: chain.chain,
@@ -176,7 +193,7 @@ class WalletSync {
       synced: false,
       server: null,
       height: 0,
-      explorer: chain.mempool,
+      explorer: chain.mempool[0] ?? "",
       fees: null,
       addresses: [],
       utxos: [],
@@ -251,14 +268,18 @@ class WalletSync {
     })()
   }
 
-  /** Derive addresses until each branch has `gap` unused ones past the last used (on any chain); subscribe new ones. */
+  /**
+   * Derive addresses until each branch has `gap` unused ones past the last used (on this chain or its replay pair,
+   * which share addresses); subscribe new ones.
+   */
   private async discover() {
     if (this.stopped) return false
     const walletId = this.walletId
+    const family = this.chain.family
     const settings = await getSettings()
     const [rows, used, states] = await Promise.all([
-      db.address.findMany({ where: { walletId } }),
-      db.addressState.findMany({ where: { walletId, used: true }, select: { address: true } }),
+      db.address.findMany({ where: { walletId, family } }),
+      db.addressState.findMany({ where: { walletId, chain: { in: syncedChains(this.chain.chain) }, used: true }, select: { address: true } }),
       db.addressState.findMany({ where: { walletId, chain: this.chain.chain }, select: { address: true, status: true } }),
     ])
     const usedSet = new Set(used.map((u) => u.address))
@@ -269,10 +290,10 @@ class WalletSync {
       const lastUsed = Math.max(-1, ...branch.filter((r) => usedSet.has(r.address)).map((r) => r.index))
       const want = lastUsed + 1 + (change ? settings.gapChange : settings.gapReceive)
       for (let index = branch.length; index < want; index++) {
-        const { address } = deriveAddress(this.wallet.xpub, change, index)
-        const row = { address, change, index, scripthash: scriptHash(address) }
-        // both chains derive the same rows for a wallet
-        await db.address.upsert({ where: { walletId_address: { walletId, address } }, create: { walletId, ...row }, update: {} })
+        const { address } = deriveAddress(this.account.xpub, change, index, family)
+        const row = { address, change, index, scripthash: scriptHash(address, family) }
+        // a family's chains (Bitcoin and Blake) derive the same rows for a wallet
+        await db.address.upsert({ where: { walletId_address: { walletId, address } }, create: { walletId, family, ...row }, update: {} })
         all.push(row)
         added = true
       }
@@ -282,7 +303,7 @@ class WalletSync {
     await Promise.all(
       fresh.map(async (a) => {
         this.subscribed.set(a.scripthash, a)
-        this.scripts.add(bytesToHex(addressScript(a.address)))
+        this.scripts.add(bytesToHex(addressScript(a.address, family)))
         const status = await this.chain.subscribe(a.scripthash, this)
         if (!stored.has(a.address) || stored.get(a.address) !== status) this.dirty.set(a.scripthash, status)
       }),
@@ -384,7 +405,7 @@ class WalletSync {
     const chain = this.chain.chain
     const walletId = this.walletId
     const [addresses, states, utxos, txs, labels] = await Promise.all([
-      db.address.findMany({ where: { walletId }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
+      db.address.findMany({ where: { walletId, family: this.chain.family }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
       db.addressState.findMany({ where: { walletId, chain } }),
       db.utxo.findMany({ where: { walletId, chain }, orderBy: { value: "desc" } }),
       db.tx.findMany({ where: { walletId, chain } }),
@@ -442,13 +463,13 @@ export type { ChainClient, WalletSync }
 const g = globalThis as typeof globalThis & { chains?: Partial<Record<Chain, ChainClient>>; syncListeners?: Set<() => void> }
 const changeListeners = (g.syncListeners ??= new Set())
 
-export class ExtensionDisabledError extends Error {
-  constructor() {
-    super("The Blake2b extension is disabled")
+export class ChainInactiveError extends Error {
+  constructor(chain: Chain) {
+    super(`${CHAINS[chain].label} isn't the selected network: switch to it in the navbar`)
   }
 }
 
-/** Active chain clients right now (no I/O): Bitcoin always, Blake while the Blake2b extension is on. */
+/** Active chain clients right now (no I/O): the selected network and its replay pair. */
 export const currentChains = (): Partial<Record<Chain, ChainClient>> => g.chains ?? {}
 /** Every active wallet sync, across chains. */
 export const currentSyncs = () => Object.values(currentChains()).flatMap((c) => [...c!.syncs.values()])
@@ -456,33 +477,39 @@ export const currentSyncs = () => Object.values(currentChains()).flatMap((c) => 
 /** Notified when a chain or wallet sync starts or stops (the SSE stream re-subscribes). */
 export const onSyncsChange = (l: () => void) => (changeListeners.add(l), () => void changeListeners.delete(l))
 
-/** Start/stop chains and per-wallet syncs to match settings and the wallet list. */
+/**
+ * Start/stop chain clients and per-wallet syncs to match the selected network (plus its replay pair), each chain's
+ * sources and the wallet list. Wallets sync on a chain when they have an account on its family.
+ */
 export async function syncWatchers() {
-  const [{ blake }, wallets] = await Promise.all([getSettings(), listWallets()])
+  const [settings, wallets] = await Promise.all([getSettings(), listWallets()])
   const chains = (g.chains ??= {})
+  const want = syncedChains(settings.chain)
   let changed = false
-  const want: Record<Chain, boolean> = { btc: true, xbt: blake }
-  for (const chain of ["btc", "xbt"] as const) {
-    if (want[chain] && !chains[chain]) {
-      chains[chain] = new ChainClient(chain, config.electrum[chain], config.mempool[chain])
-      changed = true
-    } else if (!want[chain] && chains[chain]) {
-      chains[chain]!.stop()
+  for (const chain of CHAIN_IDS) {
+    const { electrum, mempool } = config.sources(chain, settings)
+    const running = chains[chain]
+    if (running && (!want.includes(chain) || running.key !== JSON.stringify([electrum, mempool]))) {
+      running.stop()
       delete chains[chain]
+      changed = true
+    }
+    if (want.includes(chain) && !chains[chain]) {
+      chains[chain] = new ChainClient(chain, electrum, mempool)
       changed = true
     }
     const client = chains[chain]
     if (!client) continue
     for (const [id, sync] of client.syncs) {
       const w = wallets.find((x) => x.id === id)
-      if (!w || w.xpub !== sync.wallet.xpub) {
+      if (w?.accounts[client.family]?.xpub !== sync.account.xpub) {
         sync.stop()
         client.syncs.delete(id)
         changed = true
       }
     }
     for (const w of wallets)
-      if (!client.syncs.has(w.id)) {
+      if (w.accounts[client.family] && !client.syncs.has(w.id)) {
         client.syncs.set(w.id, new WalletSync(w, client))
         changed = true
       }
@@ -491,16 +518,16 @@ export async function syncWatchers() {
   return chains
 }
 
-/** The chain client, or ExtensionDisabledError when that chain's extension is off. */
+/** The chain client, or ChainInactiveError when that chain isn't synced (another network is selected). */
 export async function chainFor(chain: Chain) {
   const c = (await syncWatchers())[chain]
-  if (!c) throw new ExtensionDisabledError()
+  if (!c) throw new ChainInactiveError(chain)
   return c
 }
 
 /** A wallet's sync on a chain. */
 export async function syncFor(walletId: string, chain: Chain) {
   const s = (await chainFor(chain)).syncs.get(walletId)
-  if (!s) throw new Error("Unknown wallet")
+  if (!s) throw new Error("This wallet has no account on that network")
   return s
 }

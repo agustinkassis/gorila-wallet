@@ -1,5 +1,5 @@
 import { authorizedJson, isChain } from "@/lib/server/auth"
-import { ExtensionDisabledError, chainFor } from "@/lib/server/watcher"
+import { ChainInactiveError, chainFor } from "@/lib/server/watcher"
 
 /** POST {chain, txids} → {[txid]: hex}. Parent txs for PSBT nonWitnessUtxo and fee bumping (SQLite cache first). */
 export async function POST(req: Request) {
@@ -13,7 +13,7 @@ export async function POST(req: Request) {
     const entries = await Promise.all(txids.map(async (t: string) => [t, await watcher.rawHex(t)] as const))
     return Response.json(Object.fromEntries(entries))
   } catch (e) {
-    if (e instanceof ExtensionDisabledError) return Response.json({ error: e.message }, { status: 409 })
+    if (e instanceof ChainInactiveError) return Response.json({ error: e.message }, { status: 409 })
     return Response.json({ error: "Transaction not found" }, { status: 404 })
   }
 }

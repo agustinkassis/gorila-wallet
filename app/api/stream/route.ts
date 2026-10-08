@@ -7,7 +7,7 @@ import type { StreamMessage } from "@/lib/wallet"
 /**
  * SSE: the wallet list, settings, then live snapshots for every wallet on every active chain.
  * One NIP-98 signature per connection; switching wallets in the UI needs no reconnect.
- * Follows changes live: wallets added/removed, the Blake2b extension toggled.
+ * Follows changes live: wallets added/removed, the network switched (the selected chain and its replay pair).
  */
 export async function GET(req: Request) {
   const denied = await requireNostr(req)

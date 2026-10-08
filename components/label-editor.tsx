@@ -5,6 +5,7 @@ import { TagIcon } from "lucide-react"
 import { toast } from "sonner"
 import { useWallet } from "@/components/wallet-provider"
 import { api } from "@/lib/api"
+import type { Chain } from "@/lib/chains"
 import { cn } from "@/lib/utils"
 
 /** Inline BIP-329 label: click to edit, Enter/blur saves, Escape cancels. */
@@ -15,7 +16,7 @@ export function LabelEditor({
   value,
   className,
 }: {
-  chain: "btc" | "xbt" | "all"
+  chain: Chain | "all"
   type: "tx" | "addr" | "output"
   target: string
   value?: string

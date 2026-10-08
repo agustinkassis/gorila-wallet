@@ -7,11 +7,12 @@ import { RawTx, SigHash, Transaction, p2pkh, p2wpkh } from "@scure/btc-signer"
 import { secp256k1 } from "@noble/curves/secp256k1.js"
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js"
 import { finalizeEvent, generateSecretKey, getPublicKey, nip98 } from "nostr-tools"
-import { deriveAddresses, normalizeXpub, parseCoins, scriptHash, txEvents, type Snapshot, type Tx } from "../lib/wallet"
+import { familyPath } from "../lib/chains"
+import { amountInput, deriveAddresses, displayXpub, formatAmount, normalizeXpub, parseAmount, parseCoins, scriptHash, txEvents, type Snapshot, type Tx } from "../lib/wallet"
 import { db } from "../lib/server/db"
-import { WrongPasswordError, seal, unseal } from "../lib/server/secret"
-import { createSeedWallet, deleteWallet, importWatchWallet, listWallets, signingAccount } from "../lib/server/wallets"
-import { buildPsbt, cpfpFee, feeAt, importSigned, opReturnScript, outputRuleError, planTx, rbfFee, type Coin } from "../lib/tx"
+import { WrongPasswordError, isLocked, seal, unseal } from "../lib/server/secret"
+import { createSeedWallet, deleteWallet, importWatchWallet, listWallets, signingAccount, unlockAccounts } from "../lib/server/wallets"
+import { addressFor, buildPsbt, cpfpFee, feeAt, importSigned, opReturnScript, outputRuleError, planTx, rbfFee, scriptFor, type Coin } from "../lib/tx"
 import { SIGHASH_ALL_UNIFIED, unifiedSighash, type ScriptType } from "../lib/unified-sighash"
 import { requireNostr } from "../lib/server/auth"
 import { headerTime } from "../lib/server/watcher"
@@ -34,19 +35,28 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   const master = HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic))
   const account = master.derive("m/84'/0'/0'")
   const xpub = account.publicExtendedKey
-  assert.deepEqual(deriveAddresses(xpub, 2), ["bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"])
-  assert.equal(deriveAddresses(xpub, 1, 1)[0], "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el")
+  assert.deepEqual(deriveAddresses(xpub, "main", 2), ["bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"])
+  assert.equal(deriveAddresses(xpub, "main", 1, 1)[0], "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el")
   // BIP84 account zpub → the same key as an xpub
-  assert.equal(normalizeXpub("zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs"), xpub)
-  assert.equal(normalizeXpub(xpub), xpub)
-  await throws(() => normalizeXpub(account.privateExtendedKey), /xpub or zpub/)
+  assert.deepEqual(normalizeXpub("zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs"), { xpub, family: "main" })
+  assert.deepEqual(normalizeXpub(xpub), { xpub, family: "main" })
+  await throws(() => normalizeXpub(account.privateExtendedKey), /xpub\/zpub/)
+  // testnets and signet: coin type 1' (m/84'/1'/0'), tb1 addresses, vpub/tpub keys
+  const testXpub = master.derive("m/84'/1'/0'").publicExtendedKey
+  assert.equal(deriveAddresses(testXpub, "test", 1)[0], "tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl")
+  assert.deepEqual(normalizeXpub(displayXpub(testXpub, "test")), { xpub: testXpub, family: "test" })
+  assert.equal(familyPath("m/84'/0'/0'", "test"), "m/84'/1'/0'")
+  assert.equal(familyPath("m/84'/1'/3'", "main"), "m/84'/0'/3'")
 
   // --- Seed encryption: right password opens it, wrong one fails authentication ----------------
   const sealed = await seal("abandon … about", "correct horse")
   assert.equal(await unseal(sealed, "correct horse"), "abandon … about")
   await assert.rejects(unseal(sealed, "wrong horse"), WrongPasswordError)
+  // no password: stored as-is, flagged unlocked
+  assert.ok(isLocked(sealed) && !isLocked(await seal("abandon … about", "")))
+  assert.equal(await unseal(await seal("abandon … about", ""), ""), "abandon … about")
 
-  assert.equal(scriptHash("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"), "8b01df4e368ea28f8dc0423bcf7a4923e3a12d307c875e47a0cfbf90b5c39161")
+  assert.equal(scriptHash("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", "main"), "8b01df4e368ea28f8dc0423bcf7a4923e3a12d307c875e47a0cfbf90b5c39161")
   assert.equal(
     headerTime(
       "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c",
@@ -57,6 +67,13 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   assert.equal(parseCoins("1"), 100_000_000)
   assert.equal(parseCoins("0.123456789"), null)
   assert.equal(parseCoins("abc"), null)
+  // sats unit: whole numbers only (a "." is never a thousands separator), and fields round-trip across the switch
+  assert.equal(parseAmount("150,000", "sats"), 150_000)
+  assert.equal(parseAmount("0.0015", "sats"), null)
+  assert.equal(parseAmount("150.000", "sats"), null)
+  assert.equal(formatAmount(150_000, "sats"), "150,000")
+  assert.equal(parseAmount(amountInput(parseAmount("0.0015", "btc")!, "sats"), "sats"), 150_000)
+  assert.equal(amountInput(parseAmount("150000", "sats")!, "btc"), "0.00150000")
 
   // --- Incoming-tx events -----------------------------------------------------------------
   const snap = (txs: Tx[], synced = true): Snapshot => ({
@@ -92,12 +109,18 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   const addr0 = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
   const change0 = "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el"
   const dest = "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"
-  assert.equal(opReturnScript(new Uint8Array()).length, 84) // padded: Blake rejects > 83
-  assert.ok(opReturnScript(new Uint8Array(500)).length > 84)
-  assert.match(outputRuleError("xbt", opReturnScript(new Uint8Array()))!, /not allowed on Blake/)
+  assert.equal(opReturnScript(new Uint8Array(), "btc").length, 84) // padded: Blake rejects > 83
+  assert.ok(opReturnScript(new Uint8Array(500), "btc").length > 84)
+  assert.match(outputRuleError("xbt", opReturnScript(new Uint8Array(), "btc"))!, /not allowed on Blake/)
+  assert.match(outputRuleError("xbt", Uint8Array.of(0x6a, 1, 0))!, /not allowed on Blake/) // policy, though consensus allows ≤ 83
   assert.match(outputRuleError("xbt", new Uint8Array(35))!, /34 bytes/)
   assert.match(outputRuleError("btc", Uint8Array.of(0x6a, 1, 0))!, /≥ 84/)
-  assert.equal(outputRuleError("btc", opReturnScript(new Uint8Array(10))), null)
+  assert.equal(outputRuleError("btc", opReturnScript(new Uint8Array(10), "btc")), null)
+  // chains without a replay pair: no padding, no minimum, their own addresses
+  assert.equal(opReturnScript(Uint8Array.of(1, 2), "tbtc4").length, 4)
+  assert.equal(outputRuleError("signet", Uint8Array.of(0x6a, 1, 0)), null)
+  await throws(() => scriptFor(addr0, "tbtc4"), /Invalid Testnet4 address/)
+  assert.equal(addressFor(scriptFor("tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl", "tbtc3"), "signet"), "tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl")
 
   const coin = (txid: string, value: number, height = 100): Coin => ({ txid, vout: 0, value, address: addr0, change: 0, index: 0, height })
   const coins = [coin("a".repeat(64), 50_000), coin("b".repeat(64), 20_000), coin("c".repeat(64), 5_000)]
@@ -117,7 +140,7 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   assert.equal(p.outputs[0].amount + p.fee, 75_000)
   await throws(() => planTx({ chain: "btc", recipients: [{ address: dest, amount: 100 }], candidates: coins, fee: feeAt(1), changeAddress: change0 }), /dust/)
   await throws(() => planTx({ chain: "btc", recipients: [{ address: dest, amount: 1e9 }], candidates: coins, fee: feeAt(1), changeAddress: change0 }), /Insufficient/)
-  await throws(() => planTx({ chain: "btc", recipients: [{ address: "nope", amount: 1e4 }], candidates: coins, fee: feeAt(1), changeAddress: change0 }), /Invalid address/)
+  await throws(() => planTx({ chain: "btc", recipients: [{ address: "nope", amount: 1e4 }], candidates: coins, fee: feeAt(1), changeAddress: change0 }), /Invalid Bitcoin address/)
   await throws(
     () => planTx({ chain: "xbt", recipients: [{ address: dest, amount: 1e4 }], candidates: coins, fee: feeAt(1), changeAddress: change0, data: new Uint8Array(1) }),
     /not allowed on Blake/,
@@ -212,18 +235,37 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   process.env.SEED_PHRASE = mnemonic
   process.env.DERIVATION_PATH = "m/84'/0'/0'"
   const envWallet = (await listWallets()).find((w) => w.id === "env")!
-  assert.equal(envWallet.xpub, xpub)
-  assert.equal((await signingAccount("env")).fingerprint, master.fingerprint)
+  assert.equal(envWallet.accounts.main?.xpub, xpub)
+  assert.equal(envWallet.accounts.test?.xpub, testXpub)
+  assert.equal((await signingAccount("env", "main")).fingerprint, master.fingerprint)
   const soft = await createSeedWallet({ name: "check soft", mnemonic, password: "password1" })
   assert.ok(soft.needsPassword && !soft.watchOnly)
-  await throws(() => signingAccount(soft.id), /password/)
-  await assert.rejects(signingAccount(soft.id, "nope-nope"), WrongPasswordError)
-  assert.deepEqual((await signingAccount(soft.id, "password1")).keyFor(0, 0).publicKey, account.deriveChild(0).deriveChild(0).publicKey)
+  assert.deepEqual(soft.accounts.test, { xpub: testXpub, path: "m/84'/1'/0'", fingerprint: master.fingerprint })
+  await throws(() => signingAccount(soft.id, "main"), /password/)
+  await assert.rejects(signingAccount(soft.id, "main", "nope-nope"), WrongPasswordError)
+  assert.deepEqual((await signingAccount(soft.id, "main", "password1")).keyFor(0, 0).publicKey, account.deriveChild(0).deriveChild(0).publicKey)
+  assert.deepEqual((await signingAccount(soft.id, "test", "password1")).keyFor(0, 0).publicKey, master.derive("m/84'/1'/0'/0/0").publicKey)
+  // a wallet from before testnets: its test account comes back with the password (unlock), not without it
+  await db.walletAccount.delete({ where: { walletId_family: { walletId: soft.id, family: "test" } } })
+  await throws(() => signingAccount(soft.id, "test", "password1"), /isn't enabled on Testnet/)
+  await assert.rejects(unlockAccounts(soft.id, "nope-nope"), WrongPasswordError)
+  assert.equal((await unlockAccounts(soft.id, "password1")).accounts.test?.xpub, testXpub)
+  await throws(() => createSeedWallet({ name: "check short", mnemonic, password: "short" }), /8 characters/)
+  const open = await createSeedWallet({ name: "check open", mnemonic })
+  assert.ok(!open.needsPassword)
+  assert.deepEqual((await signingAccount(open.id, "main")).keyFor(0, 0).publicKey, account.deriveChild(0).deriveChild(0).publicKey)
+  // passwordless: a missing family is derived on its own
+  await db.walletAccount.delete({ where: { walletId_family: { walletId: open.id, family: "test" } } })
+  assert.equal((await listWallets()).find((w) => w.id === open.id)?.accounts.test?.xpub, testXpub)
   const watch = await importWatchWallet({ name: "check watch", xpub: "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs" })
-  assert.ok(watch.watchOnly && watch.xpub === xpub)
-  await throws(() => signingAccount(watch.id), /watch-only/)
+  assert.ok(watch.watchOnly && watch.accounts.main?.xpub === xpub && !watch.accounts.test)
+  await throws(() => signingAccount(watch.id, "main"), /watch-only/)
+  const watchTest = await importWatchWallet({ name: "check watch test", xpub: displayXpub(testXpub, "test") })
+  assert.deepEqual(watchTest.accounts, { test: { xpub: testXpub, path: "m/84'/1'/0'", fingerprint: 0 } })
+  await deleteWallet(watchTest.id)
   await throws(() => deleteWallet("env"), /\.env/)
   await deleteWallet(soft.id)
+  await deleteWallet(open.id)
   await deleteWallet(watch.id)
 
   // --- NIP-98: allowlist + payload binding ------------------------------------------------------

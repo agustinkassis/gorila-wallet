@@ -9,7 +9,8 @@
     "lint": "eslint",
     "check": "DATABASE_URL=file:./data/check.db prisma migrate deploy >/dev/null && DATABASE_URL=file:./data/check.db tsx --conditions=react-server scripts/check.ts",
     "postinstall": "prisma generate",
-    "db:migrate": "prisma migrate deploy"
+    "db:migrate": "prisma migrate deploy",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@ngraveio/bc-ur": "^1.1.13",
@@ -42,6 +43,7 @@
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
+    "@tauri-apps/cli": "^2.12.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^20",
     "@types/qrcode": "^1.5.6",

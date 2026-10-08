@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // the desktop app (scripts/desktop.mjs) ships the self-contained server
+  output: process.env.STANDALONE ? "standalone" : undefined,
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {

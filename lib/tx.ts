@@ -1,12 +1,12 @@
 // Transaction planning + PSBT building, shared by the browser (builds) and the server (re-validates).
-// All inputs are this wallet's P2WPKH coins. Chain differences live here and in lib/server/signer.ts.
+// All inputs are this wallet's P2WPKH coins. Chain differences come from lib/chains.ts (rules, sighash, addresses).
 import { HDKey } from "@scure/bip32"
-import { Address, NETWORK, OutScript, Script, SigHash, Transaction, bip32Path, p2pkh, p2wpkh } from "@scure/btc-signer"
+import { Address, OutScript, Script, SigHash, Transaction, bip32Path, p2pkh, p2wpkh } from "@scure/btc-signer"
 import { secp256k1 } from "@noble/curves/secp256k1.js"
 import { base64 } from "@scure/base"
 import { hexToBytes } from "@noble/hashes/utils.js"
 import { SIGHASH_ALL_UNIFIED, SIGHASH_UNIFIED, unifiedSighash } from "@/lib/unified-sighash"
-import type { Chain } from "@/lib/wallet"
+import { CHAINS, familyOf, minDataScript, networkOf, type Chain } from "@/lib/chains"
 
 export type Coin = { txid: string; vout: number; value: number; address: string; change: 0 | 1; index: number; height: number }
 export type Recipient = { address: string; amount: number }
@@ -16,11 +16,7 @@ export type TxPlan = { inputs: Coin[]; outputs: PlannedOutput[]; fee: number; vs
 export type FeePolicy = (vsize: number) => number
 
 export const RBF_SEQUENCE = 0xfffffffd
-/** Blake consensus (reduced_data): OP_RETURN scripts > 83 bytes are invalid there, so ≥ 84 makes a tx Bitcoin-only. */
-export const OP_RETURN_MIN_SCRIPT = 84
 export const OP_RETURN_MAX_DATA = 4000
-/** Blake consensus: any other output script > 34 bytes is invalid. */
-export const BLAKE_MAX_SCRIPT = 34
 /** Inputs cost this many vbytes (P2WPKH, 72-byte signature worst case). */
 export const INPUT_VSIZE = 68
 
@@ -62,38 +58,45 @@ export function dustLimit(script: Uint8Array) {
 
 export const isDataScript = (script: Uint8Array) => script[0] === 0x6a
 
-/** OP_RETURN script for a message, zero-padded so the script is ≥ 84 bytes (invalid on Blake → Bitcoin-only). */
-export function opReturnScript(message: Uint8Array) {
+/**
+ * OP_RETURN script for a message on `chain`. With a replay pair that caps OP_RETURNs (Blake: ≤ 83 bytes), it is
+ * zero-padded past that cap (Bitcoin: ≥ 84) so the transaction is invalid on the pair: it can't be replayed there.
+ */
+export function opReturnScript(message: Uint8Array, chain: Chain) {
   if (message.length > OP_RETURN_MAX_DATA) throw new PlanError(`OP_RETURN message is limited to ${OP_RETURN_MAX_DATA} bytes`)
-  const data = new Uint8Array(Math.max(message.length, 81)) // 1 (OP_RETURN) + 2 (PUSHDATA1 n) + 81 = 84
+  const min = minDataScript(chain)
+  const data = new Uint8Array(Math.max(message.length, min - 3)) // 1 (OP_RETURN) + 2 (PUSHDATA1 n) + data
   data.set(message)
   const script = Script.encode(["RETURN", data])
-  if (script.length < OP_RETURN_MIN_SCRIPT) throw new PlanError("OP_RETURN script too small")
+  if (script.length < min) throw new PlanError("OP_RETURN script too small")
   return script
 }
 
 /** Per-chain consensus/safety rules for an output script. Returns an error message, or null when allowed. */
 export function outputRuleError(chain: Chain, script: Uint8Array): string | null {
-  if (chain === "xbt") {
-    if (isDataScript(script)) return "OP_RETURN outputs are not allowed on Blake"
-    if (script.length > BLAKE_MAX_SCRIPT) return "Blake rejects output scripts over 34 bytes"
+  const { label, maxDataScript, maxScript, noDataOutputs, replayPair } = CHAINS[chain]
+  if (isDataScript(script)) {
+    if (maxDataScript === false || noDataOutputs) return `OP_RETURN outputs are not allowed on ${label}`
+    if (typeof maxDataScript === "number" && script.length > maxDataScript) return `${label} rejects OP_RETURN scripts over ${maxDataScript} bytes`
+    const min = minDataScript(chain)
+    if (script.length < min) return `${label} OP_RETURN must be ≥ ${min} bytes so it can't be replayed on ${CHAINS[replayPair!].label}`
     return null
   }
-  if (isDataScript(script) && script.length < OP_RETURN_MIN_SCRIPT) return "Bitcoin OP_RETURN must be ≥ 84 bytes so it can't be replayed on Blake"
+  if (maxScript && script.length > maxScript) return `${label} rejects output scripts over ${maxScript} bytes`
   return null
 }
 
-export function scriptFor(address: string) {
+export function scriptFor(address: string, chain: Chain) {
   try {
-    return OutScript.encode(Address(NETWORK).decode(address.trim()))
+    return OutScript.encode(Address(networkOf(familyOf(chain))).decode(address.trim()))
   } catch {
-    throw new PlanError(`Invalid address: ${address || "(empty)"}`)
+    throw new PlanError(`Invalid ${CHAINS[chain].label} address: ${address || "(empty)"}`)
   }
 }
 
-export const addressFor = (script: Uint8Array) => {
+export const addressFor = (script: Uint8Array, chain: Chain) => {
   try {
-    return Address(NETWORK).encode(OutScript.decode(script))
+    return Address(networkOf(familyOf(chain))).encode(OutScript.decode(script))
   } catch {
     return undefined
   }
@@ -119,14 +122,15 @@ export function planTx(o: {
   data?: Uint8Array
 }): TxPlan {
   if (!o.recipients.length) throw new PlanError("Add a recipient")
-  if (o.data && o.chain === "xbt") throw new PlanError("OP_RETURN outputs are not allowed on Blake")
-  const recipients = o.recipients.map((r) => ({ ...r, script: scriptFor(r.address) }))
-  const dataScript = o.data ? opReturnScript(o.data) : null
+  if (o.data && (CHAINS[o.chain].maxDataScript === false || CHAINS[o.chain].noDataOutputs))
+    throw new PlanError(`OP_RETURN outputs are not allowed on ${CHAINS[o.chain].label}`)
+  const recipients = o.recipients.map((r) => ({ ...r, script: scriptFor(r.address, o.chain) }))
+  const dataScript = o.data ? opReturnScript(o.data, o.chain) : null
   for (const s of [...recipients.map((r) => r.script), ...(dataScript ? [dataScript] : [])]) {
     const err = outputRuleError(o.chain, s)
     if (err) throw new PlanError(err)
   }
-  const changeScript = scriptFor(o.changeAddress)
+  const changeScript = scriptFor(o.changeAddress, o.chain)
   const fixed = [...recipients.map((r) => r.script), ...(dataScript ? [dataScript] : [])]
   const required = o.required ?? []
   const key = (c: Coin) => `${c.txid}:${c.vout}`
@@ -214,7 +218,7 @@ function shuffle<T>(list: T[]) {
 }
 
 /**
- * Unsigned PSBT for a plan. Bitcoin inputs declare SIGHASH_ALL; Blake inputs declare ALL|UNIFIED (0x21).
+ * Unsigned PSBT for a plan. Inputs declare SIGHASH_ALL, or ALL|UNIFIED (0x21) on SIGHASH_UNIFIED chains (Blake).
  * nLockTime = tip (anti-fee-sniping), nSequence signals RBF, output order is randomized.
  */
 export function buildPsbt(
@@ -222,7 +226,7 @@ export function buildPsbt(
   ctx: { chain: Chain; xpub: string; fingerprint: number; accountPath: string; tipHeight: number; parents?: Record<string, string> },
 ) {
   const account = HDKey.fromExtendedKey(ctx.xpub)
-  const sighashType = ctx.chain === "xbt" ? SIGHASH_ALL_UNIFIED : SigHash.ALL
+  const sighashType = CHAINS[ctx.chain].unifiedSighash ? SIGHASH_ALL_UNIFIED : SigHash.ALL
   const tx = new Transaction({ version: 2, lockTime: ctx.tipHeight, allowUnknownOutputs: true, allowUnknownInputs: true })
   for (const coin of plan.inputs) {
     const publicKey = account.deriveChild(coin.change).deriveChild(coin.index).publicKey!
@@ -264,7 +268,7 @@ function decodeSigned(input: Uint8Array | string): Transaction {
  * Bring back a transaction signed elsewhere (hardware wallet, Sparrow, Knots…).
  * Finalizes P2WPKH inputs from partial signatures, then checks it is exactly the transaction we built
  * (same txid: same inputs, outputs, version, locktime) and that every signature is valid for this chain:
- * BIP143 on Bitcoin, SIGHASH_UNIFIED (0x21, required) on Blake.
+ * BIP143 SIGHASH_ALL, or SIGHASH_UNIFIED (0x21, required) on chains that use it (Blake).
  */
 export function importSigned(chain: Chain, unsignedPsbt: Uint8Array, input: Uint8Array | string) {
   const expected = Transaction.fromPSBT(unsignedPsbt, { allowUnknownOutputs: true, allowUnknownInputs: true })
@@ -300,11 +304,12 @@ export function importSigned(chain: Chain, unsignedPsbt: Uint8Array, input: Uint
     if (!spent[i] || !p2wpkh(pub).script.every((b, j) => b === spent[i].script[j])) throw new PlanError(`Input ${i + 1} is signed by the wrong key`)
     const hashType = sig[sig.length - 1]
     let msg: Uint8Array
-    if (chain === "xbt") {
-      if (hashType !== SIGHASH_ALL_UNIFIED) throw new PlanError("Blake signatures must use SIGHASH_UNIFIED (0x21): this signer doesn't support Blake")
+    const { label } = CHAINS[chain]
+    if (CHAINS[chain].unifiedSighash) {
+      if (hashType !== SIGHASH_ALL_UNIFIED) throw new PlanError(`${label} signatures must use SIGHASH_UNIFIED (0x21): this signer doesn't support ${label}`)
       msg = unifiedSighash(unsigned, i, spent, SIGHASH_ALL_UNIFIED, 1, p2pkh(pub).script)
     } else {
-      if (hashType & SIGHASH_UNIFIED) throw new PlanError("This is a Blake signature: Bitcoin rejects it")
+      if (hashType & SIGHASH_UNIFIED) throw new PlanError(`This is a SIGHASH_UNIFIED signature: ${label} rejects it`)
       if (hashType !== SigHash.ALL) throw new PlanError(`Input ${i + 1} uses an unexpected sighash (0x${hashType.toString(16)})`)
       msg = expected.preimageWitnessV0(i, p2pkh(pub).script, hashType, spent[i].amount)
     }

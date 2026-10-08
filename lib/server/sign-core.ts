@@ -4,7 +4,7 @@ import { bytesToHex, concatBytes } from "@noble/hashes/utils.js"
 import { SigHash, Transaction, bip32Path, p2pkh, p2wpkh } from "@scure/btc-signer"
 import { outputRuleError } from "@/lib/tx"
 import { SIGHASH_ALL_UNIFIED, unifiedSighash } from "@/lib/unified-sighash"
-import type { Chain } from "@/lib/wallet"
+import { CHAINS, type Chain } from "@/lib/chains"
 
 export class SignError extends Error {}
 
@@ -23,7 +23,8 @@ export type SignContext = {
 /**
  * Signs a PSBT built by lib/tx.ts. Every input must be this wallet's P2WPKH coin on `chain`
  * (checked against the real parent tx, not the PSBT's claims) and not frozen.
- * Bitcoin: BIP143 SIGHASH_ALL. Blake: SIGHASH_UNIFIED (0x21), which Bitcoin rejects (replay protection).
+ * BIP143 SIGHASH_ALL, or SIGHASH_UNIFIED (0x21) on chains that use it (Blake): chains without it reject those
+ * signatures (replay protection).
  */
 export async function signWith(chain: Chain, psbt: Uint8Array, ctx: SignContext) {
   let tx: Transaction
@@ -66,7 +67,7 @@ export async function signWith(chain: Chain, psbt: Uint8Array, ctx: SignContext)
     try {
       prev = await ctx.prevOut(txid, input.index)
     } catch {
-      throw new SignError(`Unknown parent transaction ${txid.slice(0, 8)}… on ${chain.toUpperCase()}`)
+      throw new SignError(`Unknown parent transaction ${txid.slice(0, 8)}… on ${CHAINS[chain].label}`)
     }
     if (!prev.script || prev.amount === undefined || !equalBytes(prev.script, script)) throw new SignError("Input does not belong to this wallet")
     if (!input.witnessUtxo || input.witnessUtxo.amount !== prev.amount || !equalBytes(input.witnessUtxo.script, script))
@@ -78,10 +79,10 @@ export async function signWith(chain: Chain, psbt: Uint8Array, ctx: SignContext)
   const fee = spent.reduce((s, o) => s + o.amount, 0n) - outSum
   if (fee <= 0n) throw new SignError("Outputs exceed inputs")
 
-  if (chain === "btc") {
+  if (!CHAINS[chain].unifiedSighash) {
     for (let i = 0; i < keys.length; i++) {
       const declared = tx.getInput(i).sighashType
-      if (declared !== undefined && declared !== SigHash.ALL) throw new SignError("Bitcoin inputs must use SIGHASH_ALL")
+      if (declared !== undefined && declared !== SigHash.ALL) throw new SignError(`${CHAINS[chain].label} inputs must use SIGHASH_ALL`)
       tx.signIdx(keys[i].privateKey, i, [SigHash.ALL])
     }
     tx.finalize()

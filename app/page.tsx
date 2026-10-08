@@ -10,12 +10,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusDot } from "@/components/app-sidebar"
 import { copy, shorten } from "@/components/site-header"
 import { LabelEditor } from "@/components/label-editor"
+import { UnitLabel, useUnit } from "@/components/units"
 import { useWallet } from "@/components/wallet-provider"
-import { CHAINS, formatCoins, hasData, sumBalances, type Chain } from "@/lib/wallet"
+import { CHAINS, formatAmount, hasData, sumBalances, type Chain } from "@/lib/wallet"
 import { cn } from "@/lib/utils"
 
 function BalanceCard({ chain }: { chain: Chain }) {
   const { snapshots, live, flash, watchOnly } = useWallet()
+  const unit = useUnit()
   const s = snapshots[chain]
   const received = flash?.chain === chain ? flash : undefined
   const meta = CHAINS[chain]
@@ -31,7 +33,7 @@ function BalanceCard({ chain }: { chain: Chain }) {
         <div key={received.id} className="pointer-events-none absolute inset-0 z-10">
           <div className="absolute inset-0 rounded-[inherit] motion-safe:animate-receive-glow" />
           <span className="absolute top-14 right-6 rounded-full bg-emerald-500/15 px-2.5 py-1 font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400 opacity-0 motion-safe:animate-float-up">
-            +{formatCoins(received.amount)} {meta.unit}
+            +{formatAmount(received.amount, unit)} <UnitLabel chain={chain} />
           </span>
         </div>
       )}
@@ -50,11 +52,11 @@ function BalanceCard({ chain }: { chain: Chain }) {
         <CardTitle className="flex flex-wrap items-baseline gap-x-2 pt-1 font-mono text-3xl font-semibold tabular-nums sm:text-4xl">
           {loaded ? (
             <>
-              {formatCoins(confirmed)}
-              <span className={cn("text-base font-medium", meta.text)}>{meta.unit}</span>
+              {formatAmount(confirmed, unit)}
+              <UnitLabel chain={chain} className={cn("text-base font-medium", meta.text)} />
             </>
           ) : (
-            <Skeleton className="h-10 w-56" />
+            <Skeleton className="h-10 w-full max-w-56" />
           )}
         </CardTitle>
       </CardHeader>
@@ -76,7 +78,7 @@ function BalanceCard({ chain }: { chain: Chain }) {
           Pending:{" "}
           <span className={cn("font-mono tabular-nums", unconfirmed > 0 && "text-emerald-600 dark:text-emerald-400", unconfirmed < 0 && "text-rose-600 dark:text-rose-400")}>
             {unconfirmed > 0 && "+"}
-            {loaded ? formatCoins(unconfirmed) : "—"}
+            {loaded ? formatAmount(unconfirmed, unit) : "—"}
           </span>
         </span>
         <span className="font-mono tabular-nums">{loaded && s?.height ? `Block #${s.height.toLocaleString()}` : "—"}</span>
@@ -86,8 +88,9 @@ function BalanceCard({ chain }: { chain: Chain }) {
 }
 
 function Amount({ sats, loading }: { sats?: number; loading: boolean }) {
+  const unit = useUnit()
   if (loading) return <Skeleton className="ml-auto h-4 w-24" />
-  return <span className={cn("font-mono text-xs tabular-nums sm:text-sm", !sats && "text-muted-foreground/60")}>{formatCoins(sats ?? 0)}</span>
+  return <span className={cn("font-mono text-xs tabular-nums sm:text-sm", !sats && "text-muted-foreground/60")}>{formatAmount(sats ?? 0, unit)}</span>
 }
 
 export default function Dashboard() {

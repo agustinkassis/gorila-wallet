@@ -1,4 +1,6 @@
 import "server-only"
+import { CHAINS, type Chain } from "@/lib/chains"
+import type { Settings } from "@/lib/wallet"
 
 const list = (v: string) => v.split(",").map((s) => s.trim()).filter(Boolean)
 
@@ -15,16 +17,17 @@ export const config = {
   get allowedPubkeys() {
     return list(process.env.ALLOWED_PUBKEYS ?? "")
   },
-  get electrum() {
+  /**
+   * A chain's sources, first non-empty list wins: Settings → Networks, then .env (BTC_ELECTRUM, MEMPOOL_BTC_URL,
+   * TBTC4_ELECTRUM, … comma-separated), then the defaults in lib/chains.ts.
+   */
+  sources(chain: Chain, settings: Settings) {
+    const env = (name: string) => list(process.env[name] ?? "")
+    const id = chain.toUpperCase()
+    const pick = (...lists: (string[] | undefined)[]) => lists.find((l) => l?.length) ?? []
     return {
-      btc: list(process.env.BTC_ELECTRUM || "ssl://electrum.blockstream.info:50002,ssl://electrum.emzy.de:50002,ssl://bitcoin.lu.ke:50002"),
-      xbt: list(process.env.XBT_ELECTRUM || "tcp://fulcrum.kilombino.com:17717,tcp://electrum.marcanotrades.com:4142"),
-    }
-  },
-  get mempool() {
-    return {
-      btc: process.env.MEMPOOL_BTC_URL || "https://mempool.space",
-      xbt: process.env.MEMPOOL_XBT_URL || "https://mempool.kilombino.com",
+      electrum: pick(settings.sources[chain]?.electrum, env(`${id}_ELECTRUM`), CHAINS[chain].electrum),
+      mempool: pick(settings.sources[chain]?.mempool, env(`MEMPOOL_${id}_URL`), CHAINS[chain].mempool).map((u) => u.replace(/\/+$/, "")),
     }
   },
 }

@@ -5,15 +5,20 @@ import { useRouter } from "next/navigation"
 import { nip98 } from "nostr-tools"
 import { toast } from "sonner"
 import { useNostr, waitForNostr } from "@/components/nostr-provider"
+import { readUnit } from "@/components/units"
 import { playChime, systemNotify } from "@/lib/notify"
 import {
   CHAINS,
   DEFAULT_SETTINGS,
+  amountText,
   deriveAddresses,
-  formatCoins,
   hasData,
+  familyOf,
+  syncedChains,
   txEvents,
+  type Account,
   type Chain,
+  type Family,
   type Settings,
   type Snapshot,
   type StreamMessage,
@@ -36,8 +41,6 @@ type StreamState = {
 }
 
 const EMPTY: StreamState = { wallets: null, all: {}, settings: DEFAULT_SETTINGS, live: false }
-/** Chains the user has on: Bitcoin is core, Blake (XBT) comes with the Blake2b extension. */
-export const enabledChains = (s: Settings): Chain[] => (s.blake ? ["btc", "xbt"] : ["btc"])
 
 // Selected wallet lives in localStorage (per browser), shared across tabs like the login.
 const SELECTED_KEY = "gorilla-wallet:wallet"
@@ -52,16 +55,24 @@ type WalletContext = {
   wallet?: WalletInfo
   selectWallet: (id: string) => void
   watchOnly: boolean
+  /** the selected network (navbar) */
+  chain: Chain
+  family: Family
+  /** its replay pair while synced along (Bitcoin ↔ Blake): replay tools and the OP_RETURN guard */
+  pair?: Chain
+  /** the selected wallet's account on the network's family; undefined until enabled (see Gate) */
+  account?: Account
   xpub?: string
   path?: string
   /** master key fingerprint, for PSBT bip32Derivation */
   fingerprint?: number
   /** first receive addresses, derived in the browser from the xpub */
   addresses: string[]
-  /** the selected wallet's snapshots, enabled chains only */
+  /** the selected wallet's snapshots: the selected network and its replay pair */
   snapshots: ChainSnapshots
   /** every wallet's snapshots (wallet switcher balances) */
   allSnapshots: Record<string, ChainSnapshots>
+  /** chains shown: the selected network */
   chains: Chain[]
   settings: Settings
   live: boolean
@@ -95,7 +106,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const notify = (walletId: string, { kind, chain, tx }: TxEvent) => {
       const many = walletNames.current.length > 1
       const name = walletNames.current.find((w) => w.id === walletId)?.name
-      const amount = `+${formatCoins(tx.amount)} ${CHAINS[chain].unit}`
+      const amount = `+${amountText(tx.amount, chain, readUnit())}`
       const confirmed = tx.height > 0
       const what = kind === "confirmed" ? `${CHAINS[chain].label} payment confirmed` : `${CHAINS[chain].label} payment received`
       const title = many && name ? `${name}: ${what}` : what
@@ -194,10 +205,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const value = state.owner === pubkey ? state : EMPTY
   const wallets = value.wallets ?? []
   const wallet = wallets.find((w) => w.id === selectedId) ?? wallets[0]
-  const chains = enabledChains(value.settings)
-  // a disabled extension's chain disappears everywhere at once, even before the server drops it
-  const snapshots = Object.fromEntries(Object.entries(wallet ? (value.all[wallet.id] ?? {}) : {}).filter(([c]) => chains.includes(c as Chain)))
-  const addresses = useMemo(() => (wallet ? deriveAddresses(wallet.xpub) : []), [wallet])
+  const chain = value.settings.chain
+  const family = familyOf(chain)
+  const synced = syncedChains(chain)
+  const pair = synced[1]
+  const account = wallet?.accounts[family]
+  // switching networks hides the previous one at once, even before the server drops it
+  const snapshots = Object.fromEntries(Object.entries(wallet ? (value.all[wallet.id] ?? {}) : {}).filter(([c]) => synced.includes(c as Chain)))
+  const addresses = useMemo(() => (account ? deriveAddresses(account.xpub, family) : []), [account, family])
 
   return (
     <Ctx.Provider
@@ -207,13 +222,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         wallet,
         selectWallet,
         watchOnly: !!wallet?.watchOnly,
-        xpub: wallet?.xpub,
-        path: wallet?.path,
-        fingerprint: wallet?.fingerprint,
+        chain,
+        family,
+        pair,
+        account,
+        xpub: account?.xpub,
+        path: account?.path,
+        fingerprint: account?.fingerprint,
         addresses,
         snapshots,
         allSnapshots: value.all,
-        chains,
+        chains: [chain],
         settings: value.settings,
         live: value.live,
         error: value.error,

@@ -1,10 +1,12 @@
 import "server-only"
 import { bytesToHex } from "@noble/hashes/utils.js"
+import { sha256 } from "@noble/hashes/sha2.js"
+import { CHAINS, type Chain } from "@/lib/chains"
 import { db } from "@/lib/server/db"
-import { chainFor } from "@/lib/server/watcher"
-import { BLAKE_MAX_SCRIPT, addressFor, isDataScript, parseTxHex } from "@/lib/tx"
+import { chainFor, type ChainClient } from "@/lib/server/watcher"
+import { addressFor, isDataScript, parseTxHex } from "@/lib/tx"
 import { SIGHASH_UNIFIED } from "@/lib/unified-sighash"
-import { CHAINS, addressScript, type Chain, type Fees } from "@/lib/wallet"
+import { addressScript, type Family, type Fees } from "@/lib/wallet"
 
 export type Status = "pass" | "warn" | "fail"
 export type ReplayInput = {
@@ -18,7 +20,7 @@ export type ReplayInput = {
   status: Status
   note: string
 }
-export type ReplayOutput = { address: string | null; amount: number; data: boolean; scriptSize: number; status: Status; note: string }
+export type ReplayOutput = { address: string | null; amount: number; data: boolean; scriptSize: number; ours: boolean; status: Status; note: string }
 export type ReplayCheck = { id: string; label: string; status: Status; detail: string }
 export type ReplayAnalysis = {
   from: Chain
@@ -37,36 +39,53 @@ export type ReplayAnalysis = {
 }
 
 const LOCKTIME_THRESHOLD = 500_000_000
-/** Blake reduced_data consensus: OP_RETURN scripts ≤ 83 bytes, any other output script ≤ 34 bytes. */
-const BLAKE_MAX_DATA_SCRIPT = 83
 
+/** Consensus validity of an output on the target chain (its OP_RETURN and script size limits). */
 function outputOnTarget(to: Chain, script: Uint8Array): { status: Status; note: string } {
-  if (to === "btc") return { status: "pass", note: "valid on Bitcoin" }
+  const { label, maxDataScript, maxScript } = CHAINS[to]
   const data = isDataScript(script)
-  const max = data ? BLAKE_MAX_DATA_SCRIPT : BLAKE_MAX_SCRIPT
-  return script.length > max
-    ? { status: "fail", note: `${script.length}-byte ${data ? "OP_RETURN" : "script"}: Blake allows ≤ ${max}` }
-    : { status: "pass", note: "valid on Blake" }
+  const max = data ? maxDataScript : maxScript
+  if (data && max === false) return { status: "fail", note: `OP_RETURN: ${label} allows none` }
+  return typeof max === "number" && script.length > max
+    ? { status: "fail", note: `${script.length}-byte ${data ? "OP_RETURN" : "script"}: ${label} allows ≤ ${max}` }
+    : { status: "pass", note: `valid on ${label}` }
+}
+
+/** Is `txid:vout` (paying `script`) unspent on the target chain? Asked to its Electrum server, for anyone's coin. */
+async function outpointOnTarget(dst: ChainClient, txid: string, vout: number, script: Uint8Array | null): Promise<ReplayInput["onTarget"]> {
+  const exists = await dst.rawHex(txid).then(
+    () => true,
+    () => false,
+  )
+  if (!exists) return "missing"
+  if (!script) return "unknown"
+  try {
+    const sh = bytesToHex(sha256(script).reverse())
+    const unspent = await dst.client.request<{ tx_hash: string; tx_pos: number }[]>("blockchain.scripthash.listunspent", [sh])
+    return unspent.some((u) => u.tx_hash === txid && u.tx_pos === vout) ? "unspent" : "spent"
+  } catch {
+    return "unknown" // e.g. a huge address the server won't list: the network decides on broadcast
+  }
 }
 
 /**
- * Can `txid` (confirmed or pending on `from`) be rebroadcast as-is on the other chain?
- * Same bytes, same signatures: it is valid there only if every input's coin exists unspent there,
- * the signatures don't opt into SIGHASH_UNIFIED when going to Bitcoin, every output satisfies the
- * target's consensus rules, and the locktime is already final there.
- * Only this wallet's own coins may be replayed: replaying someone else's tx would move their funds.
+ * Can `txid` (confirmed or pending on `from`) be rebroadcast as-is on its replay pair (Bitcoin ↔ Blake)?
+ * Same bytes, same signatures: it is valid there only if every input's coin exists unspent there, the signatures
+ * don't use SIGHASH_UNIFIED when the target lacks it, every output satisfies the target's consensus rules, and the
+ * locktime is already final there. Anyone's transaction can be replayed: its coins move on the target exactly as
+ * the signer sent them on the source (an incoming payment replayed pays you the forked coins too).
  */
 export async function analyzeReplay(walletId: string, from: Chain, txid: string): Promise<ReplayAnalysis> {
-  const to: Chain = from === "btc" ? "xbt" : "btc"
+  const to = CHAINS[from].replayPair
+  if (!to) throw new Error(`${CHAINS[from].label} has no replay pair`)
   const [src, dst] = await Promise.all([chainFor(from), chainFor(to)])
   const hex = await src.rawHex(txid)
   const tx = parseTxHex(hex)
   const T = CHAINS[to].label
 
-  const [ours, targetUtxos] = await Promise.all([
-    db.address.findMany({ where: { walletId }, select: { address: true } }).then((rows) => new Set(rows.map((r) => bytesToHex(addressScript(r.address))))),
-    db.utxo.findMany({ where: { walletId, chain: to }, select: { txid: true, vout: true } }).then((rows) => new Set(rows.map((u) => `${u.txid}:${u.vout}`))),
-  ])
+  const ours = await db.address
+    .findMany({ where: { walletId }, select: { address: true, family: true } })
+    .then((rows) => new Set(rows.map((r) => bytesToHex(addressScript(r.address, r.family as Family)))))
   const existsOnTarget = (id: string) =>
     dst.rawHex(id).then(
       () => true,
@@ -90,21 +109,15 @@ export async function analyzeReplay(walletId: string, from: Chain, txid: string)
     const isOurs = !!script && ours.has(bytesToHex(script))
     const sig = inp.finalScriptWitness?.[0]
     const sighash = sig?.length ? sig[sig.length - 1] : null
-    const onTarget: ReplayInput["onTarget"] = !isOurs
-      ? "unknown"
-      : targetUtxos.has(`${prevId}:${vout}`)
-        ? "unspent"
-        : (await existsOnTarget(prevId))
-          ? "spent"
-          : "missing"
+    const onTarget = await outpointOnTarget(dst, prevId, vout, script)
 
     let status: Status = "pass"
-    let note = `unspent on ${T}`
-    if (!isOurs) [status, note] = ["fail", "not this wallet's coin"]
-    else if (onTarget === "spent") [status, note] = ["fail", `already spent on ${T}`]
+    let note = `unspent on ${T}${isOurs ? "" : " · someone else's coin"}`
+    if (onTarget === "spent") [status, note] = ["fail", `already spent on ${T}`]
     else if (onTarget === "missing") [status, note] = ["fail", `doesn't exist on ${T} (post-fork coin)`]
-    else if (to === "btc" && sighash !== null && sighash & SIGHASH_UNIFIED) [status, note] = ["fail", "SIGHASH_UNIFIED: Bitcoin rejects it"]
-    inputs.push({ txid: prevId, vout, value, address: script ? (addressFor(script) ?? null) : null, ours: isOurs, onTarget, sighash, status, note })
+    else if (!CHAINS[to].unifiedSighash && sighash !== null && sighash & SIGHASH_UNIFIED) [status, note] = ["fail", `SIGHASH_UNIFIED: ${T} rejects it`]
+    else if (onTarget === "unknown") [status, note] = ["warn", `couldn't check on ${T}: the network decides`]
+    inputs.push({ txid: prevId, vout, value, address: script ? (addressFor(script, from) ?? null) : null, ours: isOurs, onTarget, sighash, status, note })
   }
 
   let totalOut = 0
@@ -112,7 +125,16 @@ export async function analyzeReplay(walletId: string, from: Chain, txid: string)
     const o = tx.getOutput(i)
     totalOut += Number(o.amount ?? 0n)
     const rule = outputOnTarget(to, o.script!)
-    return { address: addressFor(o.script!) ?? null, amount: Number(o.amount ?? 0n), data: isDataScript(o.script!), scriptSize: o.script!.length, ...rule }
+    const mine = ours.has(bytesToHex(o.script!))
+    return {
+      address: addressFor(o.script!, from) ?? null,
+      amount: Number(o.amount ?? 0n),
+      data: isDataScript(o.script!),
+      scriptSize: o.script!.length,
+      ours: mine,
+      status: rule.status,
+      note: mine ? `${rule.note} · to you` : rule.note,
+    }
   })
 
   const fee = totalIn === null ? null : totalIn - totalOut
@@ -128,31 +150,39 @@ export async function analyzeReplay(walletId: string, from: Chain, txid: string)
   const lockFinal = !lockActive || (lockTime < LOCKTIME_THRESHOLD ? lockTime <= targetHeight : lockTime <= Date.now() / 1000)
 
   const all = (s: { status: Status }[]) => (s.every((x) => x.status === "pass") ? "pass" : "fail")
-  const sigProtected = inputs.some((i) => to === "btc" && i.sighash !== null && i.sighash & SIGHASH_UNIFIED)
+  const sigProtected = !CHAINS[to].unifiedSighash && inputs.some((i) => i.sighash !== null && i.sighash & SIGHASH_UNIFIED)
+  const foreign = inputs.filter((i) => !i.ours).length
+  const toYou = outputs.filter((o) => o.ours).reduce((s, o) => s + o.amount, 0)
+  const blocked = inputs.filter((i) => i.onTarget === "spent" || i.onTarget === "missing").length
+  const unknown = inputs.filter((i) => i.onTarget === "unknown").length
   const checks: ReplayCheck[] = [
     {
       id: "ours",
-      label: "Inputs belong to this wallet",
-      status: inputs.every((i) => i.ours) ? "pass" : "fail",
-      detail: inputs.every((i) => i.ours) ? "Every input spends one of your coins." : "Replaying would move someone else's coins, so it isn't offered.",
+      label: "Whose coins move",
+      status: foreign ? "warn" : "pass",
+      detail: !foreign
+        ? "Every input spends one of your coins."
+        : `${foreign} of ${inputs.length} inputs are someone else's: replaying moves their ${T} coins to the same recipients as on ${CHAINS[from].label}${toYou ? `, ${toYou.toLocaleString()} sats of them to you` : ""}.`,
     },
     {
       id: "coins",
       label: `Coins exist unspent on ${T}`,
-      status: inputs.every((i) => i.onTarget === "unspent") ? "pass" : "fail",
-      detail: inputs.every((i) => i.onTarget === "unspent")
-        ? "These are pre-fork coins still unspent on the other chain."
-        : `${inputs.filter((i) => i.onTarget !== "unspent").length} of ${inputs.length} inputs are spent, missing or unknown on ${T}.`,
+      status: blocked ? "fail" : unknown ? "warn" : "pass",
+      detail: blocked
+        ? `${blocked} of ${inputs.length} inputs are spent or missing on ${T}.`
+        : unknown
+          ? `${unknown} of ${inputs.length} inputs couldn't be checked on ${T}; the rest are unspent there.`
+          : `These are pre-fork coins still unspent on ${T}.`,
     },
     {
       id: "signatures",
       label: "Signatures are valid there",
       status: sigProtected ? "fail" : "pass",
       detail: sigProtected
-        ? "Signed with SIGHASH_UNIFIED (0x21): replay-protected, Bitcoin computes a different message and rejects it."
-        : to === "xbt"
-          ? "Ordinary Bitcoin signatures (no SIGHASH_UNIFIED) are valid on Blake."
-          : "Legacy-signed (no SIGHASH_UNIFIED), so Bitcoin accepts the signatures.",
+        ? `Signed with SIGHASH_UNIFIED (0x21): replay-protected, ${T} computes a different message and rejects it.`
+        : CHAINS[to].unifiedSighash
+          ? `Ordinary signatures (no SIGHASH_UNIFIED) are valid on ${T}.`
+          : `Legacy-signed (no SIGHASH_UNIFIED), so ${T} accepts the signatures.`,
     },
     {
       id: "outputs",
@@ -160,9 +190,9 @@ export async function analyzeReplay(walletId: string, from: Chain, txid: string)
       status: all(outputs),
       detail:
         all(outputs) === "pass"
-          ? to === "xbt"
-            ? "Every output fits Blake's size limits (OP_RETURN ≤ 83 bytes, scripts ≤ 34 bytes)."
-            : "Bitcoin accepts every output."
+          ? CHAINS[to].maxScript
+            ? `Every output fits ${T}'s size limits (OP_RETURN ≤ ${CHAINS[to].maxDataScript} bytes, scripts ≤ ${CHAINS[to].maxScript} bytes).`
+            : `${T} accepts every output.`
           : outputs.find((o) => o.status === "fail")!.note,
     },
     {
