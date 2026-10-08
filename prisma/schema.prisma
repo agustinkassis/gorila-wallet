@@ -1,0 +1,96 @@
+// Local wallet cache + user metadata. Chain-scoped rows use chain = "btc" | "xbt".
+// Values are satoshis (BigInt). Electrum stays the source of truth; this is a warm, indexed cache.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// Addresses derived from the account xpub (identical on both chains).
+model Address {
+  address    String @id
+  change     Int // 0 = receive, 1 = change
+  index      Int
+  scripthash String @unique
+
+  @@unique([change, index])
+}
+
+/// Per-chain sync state of an address. `status` is the Electrum status hash: unchanged => skip resync.
+model AddressState {
+  chain       String
+  address     String
+  status      String?
+  used        Boolean @default(false)
+  confirmed   BigInt  @default(0)
+  unconfirmed BigInt  @default(0)
+  /// JSON [[txid, height], ...] from the last get_history: lets us GC replaced/evicted txs without refetching everything
+  history     String  @default("[]")
+
+  @@id([chain, address])
+  @@index([chain, used])
+}
+
+model Utxo {
+  chain   String
+  txid    String
+  vout    Int
+  address String
+  value   BigInt
+  height  Int // <= 0 while unconfirmed
+
+  @@id([chain, txid, vout])
+  @@index([chain, address])
+}
+
+/// Wallet transactions (net effect on our addresses).
+model Tx {
+  chain  String
+  txid   String
+  height Int
+  time   Int?
+  amount BigInt
+  fee    BigInt?
+  vsize  Int?
+
+  @@id([chain, txid])
+  @@index([chain, height])
+}
+
+/// Immutable raw transaction cache (wallet txs and their parents).
+model RawTx {
+  chain String
+  txid  String
+  hex   String
+
+  @@id([chain, txid])
+}
+
+/// Block timestamp cache.
+model Header {
+  chain  String
+  height Int
+  time   Int
+
+  @@id([chain, height])
+}
+
+/// BIP-329 style labels. type: tx | addr | output (ref "txid:vout"). spendable=false => frozen.
+model Label {
+  chain     String
+  type      String
+  ref       String
+  label     String?
+  spendable Boolean?
+
+  @@id([chain, type, ref])
+}
+
+model Setting {
+  key   String @id
+  value String // JSON
+}

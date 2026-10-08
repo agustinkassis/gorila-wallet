@@ -1,0 +1,240 @@
+// Transaction planning + PSBT building, shared by the browser (builds) and the server (re-validates).
+// All inputs are this wallet's P2WPKH coins. Chain differences live here and in lib/server/signer.ts.
+import { HDKey } from "@scure/bip32"
+import { Address, NETWORK, OutScript, Script, SigHash, Transaction, bip32Path, p2wpkh } from "@scure/btc-signer"
+import { hexToBytes } from "@noble/hashes/utils.js"
+import { SIGHASH_ALL_UNIFIED } from "@/lib/unified-sighash"
+import type { Chain } from "@/lib/wallet"
+
+export type Coin = { txid: string; vout: number; value: number; address: string; change: 0 | 1; index: number; height: number }
+export type Recipient = { address: string; amount: number }
+export type PlannedOutput = { script: Uint8Array; amount: number; address?: string; kind: "recipient" | "change" | "data" }
+export type TxPlan = { inputs: Coin[]; outputs: PlannedOutput[]; fee: number; vsize: number }
+/** Fee policy: total fee (sats) for a given vsize. */
+export type FeePolicy = (vsize: number) => number
+
+export const RBF_SEQUENCE = 0xfffffffd
+/** Blake consensus (reduced_data): OP_RETURN scripts > 83 bytes are invalid there, so ≥ 84 makes a tx Bitcoin-only. */
+export const OP_RETURN_MIN_SCRIPT = 84
+export const OP_RETURN_MAX_DATA = 4000
+/** Blake consensus: any other output script > 34 bytes is invalid. */
+export const BLAKE_MAX_SCRIPT = 34
+/** Inputs cost this many vbytes (P2WPKH, 72-byte signature worst case). */
+export const INPUT_VSIZE = 68
+
+export class PlanError extends Error {}
+
+/** Parse a raw tx (either chain: same serialization). */
+export const parseTxHex = (hex: string) =>
+  Transaction.fromRaw(hexToBytes(hex), { allowUnknownInputs: true, allowUnknownOutputs: true, disableScriptCheck: true })
+
+export const feeAt =
+  (rate: number): FeePolicy =>
+  (v) =>
+    Math.ceil(rate * v)
+/** BIP125: pay at least `rate` and more than the replaced tx's fee plus its own relay cost (1 sat/vB). */
+export const rbfFee =
+  (rate: number, replacedFee: number): FeePolicy =>
+  (v) =>
+    Math.max(Math.ceil(rate * v), replacedFee + v)
+/** CPFP: the child pays so (parentFee + childFee) / (parentVsize + childVsize) reaches `rate`. */
+export const cpfpFee =
+  (rate: number, parentFee: number, parentVsize: number): FeePolicy =>
+  (v) =>
+    Math.max(Math.ceil(rate * (parentVsize + v) - parentFee), v)
+
+const varintLen = (n: number) => (n < 0xfd ? 1 : n <= 0xffff ? 3 : 5)
+
+/** vsize for `inputs` P2WPKH inputs and the given output scripts (signatures sized worst case). */
+export function estimateVsize(inputs: number, scripts: Uint8Array[]) {
+  const outputs = scripts.reduce((s, sc) => s + 8 + varintLen(sc.length) + sc.length, 0)
+  const base = 4 + varintLen(inputs) + 41 * inputs + varintLen(scripts.length) + outputs + 4
+  return Math.ceil((base * 4 + 2 + 108 * inputs) / 4)
+}
+
+/** Core's dust threshold at the default 3 sat/vB dust relay fee. */
+export function dustLimit(script: Uint8Array) {
+  const witness = script.length >= 4 && script.length <= 42 && (script[0] === 0 || (script[0] >= 0x51 && script[0] <= 0x60)) && script[1] === script.length - 2
+  return 3 * (8 + 1 + script.length + (witness ? 67 : 148))
+}
+
+export const isDataScript = (script: Uint8Array) => script[0] === 0x6a
+
+/** OP_RETURN script for a message, zero-padded so the script is ≥ 84 bytes (invalid on Blake → Bitcoin-only). */
+export function opReturnScript(message: Uint8Array) {
+  if (message.length > OP_RETURN_MAX_DATA) throw new PlanError(`OP_RETURN message is limited to ${OP_RETURN_MAX_DATA} bytes`)
+  const data = new Uint8Array(Math.max(message.length, 81)) // 1 (OP_RETURN) + 2 (PUSHDATA1 n) + 81 = 84
+  data.set(message)
+  const script = Script.encode(["RETURN", data])
+  if (script.length < OP_RETURN_MIN_SCRIPT) throw new PlanError("OP_RETURN script too small")
+  return script
+}
+
+/** Per-chain consensus/safety rules for an output script. Returns an error message, or null when allowed. */
+export function outputRuleError(chain: Chain, script: Uint8Array): string | null {
+  if (chain === "xbt") {
+    if (isDataScript(script)) return "OP_RETURN outputs are not allowed on Blake"
+    if (script.length > BLAKE_MAX_SCRIPT) return "Blake rejects output scripts over 34 bytes"
+    return null
+  }
+  if (isDataScript(script) && script.length < OP_RETURN_MIN_SCRIPT) return "Bitcoin OP_RETURN must be ≥ 84 bytes so it can't be replayed on Blake"
+  return null
+}
+
+export function scriptFor(address: string) {
+  try {
+    return OutScript.encode(Address(NETWORK).decode(address.trim()))
+  } catch {
+    throw new PlanError(`Invalid address: ${address || "(empty)"}`)
+  }
+}
+
+export const addressFor = (script: Uint8Array) => {
+  try {
+    return Address(NETWORK).encode(OutScript.decode(script))
+  } catch {
+    return undefined
+  }
+}
+
+const sum = (coins: Coin[]) => coins.reduce((s, c) => s + c.value, 0)
+
+/**
+ * Coin selection + fee + change. Strategy (Core-like, simplified):
+ * 1. `required` coins only (manual selection, RBF originals, CPFP parent output), topped up from candidates if short;
+ * 2. else the single coin that fits best (changeless when the excess is below the cost of a change output);
+ * 3. else largest-first accumulation.
+ * `sendMax` sweeps everything selected (required, or all candidates) to the single recipient.
+ */
+export function planTx(o: {
+  chain: Chain
+  recipients: Recipient[]
+  sendMax?: boolean
+  required?: Coin[]
+  candidates?: Coin[]
+  fee: FeePolicy
+  changeAddress: string
+  data?: Uint8Array
+}): TxPlan {
+  if (!o.recipients.length) throw new PlanError("Add a recipient")
+  if (o.data && o.chain === "xbt") throw new PlanError("OP_RETURN outputs are not allowed on Blake")
+  const recipients = o.recipients.map((r) => ({ ...r, script: scriptFor(r.address) }))
+  const dataScript = o.data ? opReturnScript(o.data) : null
+  for (const s of [...recipients.map((r) => r.script), ...(dataScript ? [dataScript] : [])]) {
+    const err = outputRuleError(o.chain, s)
+    if (err) throw new PlanError(err)
+  }
+  const changeScript = scriptFor(o.changeAddress)
+  const fixed = [...recipients.map((r) => r.script), ...(dataScript ? [dataScript] : [])]
+  const required = o.required ?? []
+  const key = (c: Coin) => `${c.txid}:${c.vout}`
+  const requiredKeys = new Set(required.map(key))
+  const pool = (o.candidates ?? []).filter((c) => !requiredKeys.has(key(c))).sort((a, b) => b.value - a.value)
+
+  const outputs = (amounts: number[], change: number): PlannedOutput[] => [
+    ...recipients.map((r, i) => ({ script: r.script, amount: amounts[i], address: r.address, kind: "recipient" as const })),
+    ...(dataScript ? [{ script: dataScript, amount: 0, kind: "data" as const }] : []),
+    ...(change > 0 ? [{ script: changeScript, amount: change, address: o.changeAddress, kind: "change" as const }] : []),
+  ]
+  const checkDust = (list: PlannedOutput[]) => {
+    for (const out of list)
+      if (out.kind !== "data" && out.amount < dustLimit(out.script)) throw new PlanError(`Amount below the dust limit (${dustLimit(out.script)} sats)`)
+  }
+
+  if (o.sendMax) {
+    if (recipients.length !== 1) throw new PlanError("Send max works with a single recipient")
+    const inputs = required.length ? required : pool
+    if (!inputs.length) throw new PlanError("No spendable coins")
+    const vsize = estimateVsize(inputs.length, fixed)
+    const fee = o.fee(vsize)
+    const plan = { inputs, outputs: outputs([sum(inputs) - fee], 0), fee, vsize }
+    checkDust(plan.outputs)
+    return plan
+  }
+
+  const target = recipients.reduce((s, r) => {
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0) throw new PlanError("Enter an amount for every recipient")
+    return s + r.amount
+  }, 0)
+  checkDust(outputs(recipients.map((r) => r.amount), 0))
+  const changeCost = (v: number) => o.fee(v + 8 + 1 + changeScript.length) - o.fee(v) + o.fee(INPUT_VSIZE)
+
+  const tryCoins = (inputs: Coin[]): (TxPlan & { excess: number }) | null => {
+    const total = sum(inputs)
+    const vNo = estimateVsize(inputs.length, fixed)
+    const feeNo = o.fee(vNo)
+    if (total < target + feeNo) return null
+    const vCh = estimateVsize(inputs.length, [...fixed, changeScript])
+    const feeCh = o.fee(vCh)
+    const change = total - target - feeCh
+    if (change >= dustLimit(changeScript) && total - target - feeNo > changeCost(vNo)) {
+      return { inputs, outputs: outputs(recipients.map((r) => r.amount), change), fee: feeCh, vsize: vCh, excess: 0 }
+    }
+    // changeless: the remainder goes to fees
+    return { inputs, outputs: outputs(recipients.map((r) => r.amount), 0), fee: total - target, vsize: vNo, excess: total - target - feeNo }
+  }
+
+  let plan: ReturnType<typeof tryCoins> = null
+  if (required.length) {
+    const inputs = [...required]
+    plan = tryCoins(inputs)
+    for (const c of pool) {
+      if (plan) break
+      inputs.push(c)
+      plan = tryCoins(inputs)
+    }
+  } else {
+    const singles = pool.map((c) => tryCoins([c])).filter((p) => p !== null)
+    const changeless = singles.filter((p) => !p.outputs.some((x) => x.kind === "change")).sort((a, b) => a.excess - b.excess)[0]
+    plan = changeless ?? singles.sort((a, b) => sum(a.inputs) - sum(b.inputs))[0] ?? null
+    const inputs: Coin[] = []
+    for (const c of pool) {
+      if (plan) break
+      inputs.push(c)
+      plan = tryCoins([...inputs])
+    }
+  }
+  if (!plan) throw new PlanError("Insufficient funds for amount + fee")
+  const { excess: _excess, ...result } = plan
+  void _excess
+  return result
+}
+
+function shuffle<T>(list: T[]) {
+  const a = [...list]
+  const r = new Uint32Array(a.length)
+  crypto.getRandomValues(r)
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = r[i] % (i + 1)
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
+/**
+ * Unsigned PSBT for a plan. Bitcoin inputs declare SIGHASH_ALL; Blake inputs declare ALL|UNIFIED (0x21).
+ * nLockTime = tip (anti-fee-sniping), nSequence signals RBF, output order is randomized.
+ */
+export function buildPsbt(
+  plan: TxPlan,
+  ctx: { chain: Chain; xpub: string; fingerprint: number; accountPath: string; tipHeight: number; parents?: Record<string, string> },
+) {
+  const account = HDKey.fromExtendedKey(ctx.xpub)
+  const sighashType = ctx.chain === "xbt" ? SIGHASH_ALL_UNIFIED : SigHash.ALL
+  const tx = new Transaction({ version: 2, lockTime: ctx.tipHeight, allowUnknownOutputs: true, allowUnknownInputs: true })
+  for (const coin of plan.inputs) {
+    const publicKey = account.deriveChild(coin.change).deriveChild(coin.index).publicKey!
+    const parent = ctx.parents?.[coin.txid]
+    tx.addInput({
+      txid: coin.txid,
+      index: coin.vout,
+      sequence: RBF_SEQUENCE,
+      witnessUtxo: { script: p2wpkh(publicKey).script, amount: BigInt(coin.value) },
+      ...(parent ? { nonWitnessUtxo: hexToBytes(parent) } : {}),
+      bip32Derivation: [[publicKey, { fingerprint: ctx.fingerprint, path: bip32Path(`${ctx.accountPath}/${coin.change}/${coin.index}`) }]],
+      sighashType,
+    })
+  }
+  for (const out of shuffle(plan.outputs)) tx.addOutput({ script: out.script, amount: BigInt(out.amount) })
+  return tx
+}
