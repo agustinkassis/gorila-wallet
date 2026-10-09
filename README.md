@@ -154,7 +154,7 @@ needs System Settings → Privacy & Security → Open Anyway on macOS, and More 
 - The backend signs only inputs that are provably this wallet's coins (derivation path, fingerprint and script checked
   against the real parent transaction), refuses frozen coins and chain-rule violations, and caps fee rates.
 - POST bodies are bound to the NIP-98 signature (`payload` tag). Each write event is accepted once, including across restarts; clients must sign a fresh event for retries.
-- Electrum TLS verifies certificates. Self-signed deployments must configure a trusted CA (for example `NODE_EXTRA_CA_CERTS`); no certificate bypass is provided. Plain `tcp://` sources remain unauthenticated.
+- Electrum TLS verifies certificates. Self-signed deployments must configure a trusted CA (for example `NODE_EXTRA_CA_CERTS`); no certificate bypass is provided. Plain `tcp://` sources remain unauthenticated. Raw transaction hashes are checked on both cache reads and network responses.
 - Software wallets with a password store their recovery words only encrypted with it; a stolen database can't spend
   them. Wallets created without a password can be spent by anyone with the database.
   Watch-only wallets can't sign. `.env` and `data/` are git-ignored.

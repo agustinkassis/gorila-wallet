@@ -102,8 +102,11 @@ class ChainClient {
   async rawHex(txid: string) {
     const where = { chain_txid: { chain: this.chain, txid } }
     const row = await db.rawTx.findUnique({ where })
-    if (row) return row.hex
-    const hex = await this.client.request<string>("blockchain.transaction.get", [txid])
+    if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Invalid transaction ID")
+    const hex = row?.hex ?? await this.client.request<string>("blockchain.transaction.get", [txid])
+    // Recheck old cache entries too: older versions trusted arbitrary Electrum responses.
+    if (typeof hex !== "string" || hex.length > 8_000_000 || parseTx(hex).id !== txid) throw new Error("Transaction ID mismatch")
+    if (row) return hex
     await db.rawTx.upsert({ where, create: { chain: this.chain, txid, hex }, update: {} })
     return hex
   }
