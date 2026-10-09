@@ -153,7 +153,7 @@ needs System Settings → Privacy & Security → Open Anyway on macOS, and More 
 
 - The backend signs only inputs that are provably this wallet's coins (derivation path, fingerprint and script checked
   against the real parent transaction), refuses frozen coins and chain-rule violations, and caps fee rates.
-- POST bodies are bound to the NIP-98 signature (`payload` tag), so a captured token can't carry a different body.
+- POST bodies are bound to the NIP-98 signature (`payload` tag). Each write event is accepted once, including across restarts; clients must sign a fresh event for retries.
 - Software wallets with a password store their recovery words only encrypted with it; a stolen database can't spend
   them. Wallets created without a password can be spent by anyone with the database.
   Watch-only wallets can't sign. `.env` and `data/` are git-ignored.

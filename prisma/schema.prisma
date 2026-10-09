@@ -132,3 +132,11 @@ model Setting {
   key   String @id
   value String // JSON
 }
+
+/// Consumed NIP-98 writes. Expired rows are removed on the next authorized write.
+model AuthEvent {
+  id        String @id
+  expiresAt Int
+
+  @@index([expiresAt])
+}
