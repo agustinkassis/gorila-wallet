@@ -30,6 +30,16 @@ async function isAllowed(pubkey: string) {
   return true
 }
 
+/** Long-lived streams must stop delivering data after access is revoked. */
+export function watchAccess(pubkey: string, onDenied: () => void) {
+  const timer = setInterval(() => {
+    void db.account.findUnique({ where: { pubkey } })
+      .then((account) => { if (!envPubkeys().has(pubkey) && !account) onDenied() })
+      .catch(onDenied)
+  }, 25_000)
+  return () => clearInterval(timer)
+}
+
 /**
  * NIP-98 + allowlist. Returns an error Response, or null when the request is authorized.
  * With `body`, the event's `payload` tag must match its hash (a captured token can't carry another body).
