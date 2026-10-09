@@ -53,6 +53,10 @@ export class Electrum {
   close() {
     this.closed = true
     clearTimeout(this.reconnect)
+    clearInterval(this.ping)
+    this.connected = false
+    for (const pending of this.pending.values()) pending.reject(new Error("Connection closed"))
+    this.pending.clear()
     this.socket?.destroy()
   }
 
@@ -72,6 +76,7 @@ export class Electrum {
       socket.setKeepAlive(true)
       try {
         await this.request("server.version", ["gorilla-wallet", "1.4"])
+        if (this.closed) return
         socket.setTimeout(0)
         this.connected = true
         this.retry = 5_000
