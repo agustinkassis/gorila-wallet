@@ -60,10 +60,8 @@ export class Electrum {
     if (this.closed) return
     const { protocol, hostname, port } = new URL(this.urls[this.index])
     const secure = protocol === "ssl:" || protocol === "tls:"
-    // ponytail: like Electrum wallet, accept self-signed certs (most public servers use them; data is public, app is watch-only).
-    // Pin cert fingerprints if a MITM faking balances becomes a concern.
     const socket = secure
-      ? tls.connect({ host: hostname, port: Number(port), servername: hostname, rejectUnauthorized: false })
+      ? tls.connect({ host: hostname, port: Number(port), servername: net.isIP(hostname) ? undefined : hostname, rejectUnauthorized: true })
       : net.connect({ host: hostname, port: Number(port) })
     this.socket = socket
     socket.setEncoding("utf8")
@@ -90,6 +88,7 @@ export class Electrum {
     this.buf += chunk
     let nl
     while ((nl = this.buf.indexOf("\n")) >= 0) {
+      if (nl > 8 * 1024 * 1024) return void this.socket?.destroy()
       const line = this.buf.slice(0, nl).trim()
       this.buf = this.buf.slice(nl + 1)
       if (!line) continue
@@ -100,8 +99,10 @@ export class Electrum {
         continue
       }
       for (const msg of msgs) {
-        if (msg.method) {
-          this.handlers.onNotify(msg.method, msg.params ?? [])
+        if (!msg || typeof msg !== "object" || Array.isArray(msg)) continue
+        if (typeof msg.method === "string") {
+          if (!Array.isArray(msg.params)) continue
+          this.handlers.onNotify(msg.method, msg.params)
           continue
         }
         const p = this.pending.get(msg.id)
@@ -111,6 +112,7 @@ export class Electrum {
         else p.resolve(msg.result)
       }
     }
+    if (this.buf.length > 8 * 1024 * 1024) this.socket?.destroy()
   }
 
   private onClose() {
