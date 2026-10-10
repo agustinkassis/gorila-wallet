@@ -1,6 +1,10 @@
 import "server-only"
 import net from "node:net"
 import tls from "node:tls"
+import { config } from "@/lib/server/config"
+
+/** One JSON-RPC line: above a 4 MB raw tx in hex and Fulcrum's 125k-entry history cap; bounds a hostile server. */
+const MAX_LINE = 16 * 1024 * 1024
 
 type Handlers = {
   onConnect: () => void
@@ -61,7 +65,7 @@ export class Electrum {
     const { protocol, hostname, port } = new URL(this.urls[this.index])
     const secure = protocol === "ssl:" || protocol === "tls:"
     const socket = secure
-      ? tls.connect({ host: hostname, port: Number(port), servername: net.isIP(hostname) ? undefined : hostname, rejectUnauthorized: true })
+      ? tls.connect({ host: hostname, port: Number(port), servername: net.isIP(hostname) ? undefined : hostname, rejectUnauthorized: !config.electrumSelfSigned.includes(hostname) })
       : net.connect({ host: hostname, port: Number(port) })
     this.socket = socket
     socket.setEncoding("utf8")
@@ -80,7 +84,7 @@ export class Electrum {
       }
     })
     socket.on("data", (chunk: string) => this.onData(chunk))
-    socket.on("error", () => {}) // "close" follows and handles reconnect
+    socket.on("error", (e) => console.warn(`Electrum ${hostname}:${port}: ${e.message}`)) // "close" follows and handles reconnect
     socket.on("close", () => this.onClose())
   }
 
@@ -88,7 +92,7 @@ export class Electrum {
     this.buf += chunk
     let nl
     while ((nl = this.buf.indexOf("\n")) >= 0) {
-      if (nl > 8 * 1024 * 1024) return void this.socket?.destroy()
+      if (nl > MAX_LINE) return void this.socket?.destroy()
       const line = this.buf.slice(0, nl).trim()
       this.buf = this.buf.slice(nl + 1)
       if (!line) continue
@@ -112,7 +116,7 @@ export class Electrum {
         else p.resolve(msg.result)
       }
     }
-    if (this.buf.length > 8 * 1024 * 1024) this.socket?.destroy()
+    if (this.buf.length > MAX_LINE) this.socket?.destroy()
   }
 
   private onClose() {
