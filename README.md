@@ -146,8 +146,9 @@ pnpm tauri build      # installers in src-tauri/target/release/bundle/
 Builds are native (Node and better-sqlite3 are bundled for the host), so each OS/arch builds on its own:
 `.github/workflows/desktop.yml` builds macOS (arm64, x64), Windows (x64, arm64) and Linux (x64, arm64) as workflow
 artifacts; a `v*` tag also creates a draft release. macOS builds are ad-hoc signed until the Developer ID secrets below
-exist; Windows installers are unsigned (SmartScreen: More info → Run anyway). App icon gorilla:
-[Twemoji](https://github.com/jdecked/twemoji), CC-BY 4.0.
+exist; Windows installers are unsigned (SmartScreen: More info → Run anyway). The app icon, favicon, splash and sidebar use the
+official logo (`src-tauri/app-icon.svg`, `components/logo.tsx`); after changing it, run `pnpm tauri icon src-tauri/app-icon.svg`
+and keep only the files already in `src-tauri/icons/`.
 
 ### Signed macOS builds
 
