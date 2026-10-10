@@ -71,7 +71,7 @@ export async function requireNostr(req: Request, body?: object): Promise<Respons
 export async function authorizedJson<T extends object>(req: Request): Promise<T | Response> {
   if (!req.headers.get("authorization")?.startsWith("Nostr ")) return Response.json({ error: "Unauthorized" }, { status: 401 })
   // Enforce the limit while reading, including chunked requests without Content-Length.
-  const maxBytes = 6 * 1024 * 1024 // includes the existing 5 MB labels import
+  const maxBytes = 16 * 1024 * 1024 // room for the labels import's 5M-char jsonl after JSON escaping and UTF-8
   if (Number(req.headers.get("content-length")) > maxBytes) return Response.json({ error: "Body too large" }, { status: 413 })
   const reader = req.body?.getReader()
   if (!reader) return Response.json({ error: "Invalid JSON" }, { status: 400 })
