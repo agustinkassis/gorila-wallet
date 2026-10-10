@@ -1,0 +1,11 @@
+services:
+  bitcoind:
+    image: ghcr.io/vulpemventures/bitcoin@sha256:9c2bf61fcaa9391e40cd7e1d5246f573397ec016de0339e8ca3be1436d923f28
+    command: [-regtest, -server=1, -txindex=1, -rpcuser=user, -rpcpassword=pass, -rpcallowip=0.0.0.0/0, -rpcbind=0.0.0.0, -fallbackfee=0.0002, -datacarriersize=1000]
+    ports: ["127.0.0.1::18443"]
+  electrs:
+    image: mempool/electrs@sha256:35963870c36a8da5fff8310e94df15869d0e97788bdaa11e63901cdb26fd781a
+    command: [--network=regtest, --daemon-rpc-addr=bitcoind:18443, --cookie=user:pass, --http-addr=0.0.0.0:3000, --electrum-rpc-addr=0.0.0.0:50001, --db-dir=/data, --jsonrpc-import]
+    depends_on: [bitcoind]
+    restart: on-failure
+    ports: ["127.0.0.1::3000", "127.0.0.1::50001"]

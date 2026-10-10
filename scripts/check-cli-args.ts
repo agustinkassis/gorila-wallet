@@ -1,0 +1,17 @@
+import assert from "node:assert/strict"
+import { parseArgs, selectWallet, positiveInteger } from "@/lib/cli/args"
+
+assert.equal(parseArgs(["balance", "--json", "--chain", "all"]).json, true)
+assert.deepEqual(parseArgs(["config", "set", "--electrum", "tcp://a:1", "--electrum", "ssl://b:2"]).values.electrum, ["tcp://a:1", "ssl://b:2"])
+assert.throws(() => parseArgs(["balance", "--wat"]), /Unknown option/)
+assert.throws(() => parseArgs(["send", "--amount-sats"]), /requires a value/)
+assert.throws(() => parseArgs(["balance", "--wallet", "a", "--wallet", "b"]), /only once/)
+assert.throws(() => positiveInteger("1.5", "amount"), /positive integer/)
+assert.throws(() => positiveInteger("9007199254740992", "amount"), /positive integer/)
+const wallet = { id: "one", name: "same", kind: "watch" as const, accounts: {}, watchOnly: true, needsPassword: false, passphrase: false }
+assert.equal(selectWallet([wallet]), wallet)
+assert.throws(() => selectWallet([]), /No wallets/)
+assert.throws(() => selectWallet([wallet, { ...wallet, id: "two" }]), /--wallet/)
+assert.throws(() => selectWallet([wallet, { ...wallet, id: "two" }], "same"), /ambiguous/)
+assert.equal(selectWallet([wallet, { ...wallet, id: "two" }], "one"), wallet)
+console.log("CLI argument checks passed")

@@ -1,5 +1,7 @@
 # flat node_modules (like npm): the desktop app bundles the Next.js standalone server, which needs real directories
 # (no symlinks in installers), short paths (Windows MAX_PATH) and one copy of React
+packages:
+  - '.'
 nodeLinker: hoisted
 ignoredBuiltDependencies:
   - sharp
