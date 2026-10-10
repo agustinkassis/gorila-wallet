@@ -16,7 +16,7 @@ import { canNotify, requestNotifications } from "@/lib/notify"
 import { minDataScript } from "@/lib/chains"
 import {
   CHAINS,
-  CHAIN_IDS,
+  WEB_CHAIN_IDS,
   FAMILIES,
   displayXpub,
   type Account,
@@ -29,7 +29,7 @@ import {
 import { cn } from "@/lib/utils"
 
 /** chains whose sends can carry an OP_RETURN their replay pair rejects (Bitcoin vs Blake) */
-const GUARDED = CHAIN_IDS.filter((c) => minDataScript(c) > 0)
+const GUARDED = WEB_CHAIN_IDS.filter((c) => minDataScript(c) > 0)
 
 const PRESETS: { key: FeePreset; label: string }[] = [
   { key: "fastestFee", label: "Fastest" },
@@ -173,7 +173,7 @@ function NetworksCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {CHAIN_IDS.map((c) => {
+        {WEB_CHAIN_IDS.map((c) => {
           const def = CHAINS[c]
           const src = effective?.[c]
           const features = [

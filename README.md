@@ -41,6 +41,9 @@ wallet. For a production server: `pnpm build && pnpm start`. To build the deskto
 
 ## Wallets
 
+For local terminal use without starting Next.js, install `gorila` with
+`pnpm link --global`. See [CLI installation, commands and examples](docs/CLI.md).
+
 Switch wallets from the top of the sidebar; add more with **Add wallet** (Sparrow-style):
 
 - **Create**: new 12/24 recovery words generated in the browser, a backup check, optional BIP39 passphrase.
@@ -145,6 +148,8 @@ needs System Settings → Privacy & Security → Open Anyway on macOS, and More 
 | `pnpm dev` / `pnpm start` | Migrate, then run (dev / production) |
 | `pnpm build` | Production build |
 | `pnpm check` | Self-checks: SIGHASH_UNIFIED vectors, signing round trips, coin selection, fee math, NIP-98 |
+| `pnpm check:cli` | CLI and core checks against isolated SQLite and simulated Electrum/mempool servers |
+| `pnpm check:cli:regtest` | CLI end-to-end checks against isolated Bitcoin Core and Electrum/Esplora in Docker, with mined confirmations |
 | `pnpm lint` | ESLint |
 | `pnpm db:migrate` | Apply Prisma migrations |
 | `pnpm tauri build` | Desktop app for this OS/arch (see above) |
