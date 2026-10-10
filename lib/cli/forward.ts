@@ -1,11 +1,10 @@
 // `gorila forward …`: rules that sweep a wallet address to another address with an OP_RETURN, run by cron.
 import { randomBytes } from "node:crypto"
 import { mkdirSync, statSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { CliError, positiveInteger, selectWallet, type Args } from "@/lib/cli/args"
-import { confirm } from "@/lib/cli/input"
+import { confirm, secret } from "@/lib/cli/input"
 import { installBlock, installedIds, readCrontab, removeBlock, schedule, shellQuote } from "@/lib/cli/crontab"
 import { db } from "@/lib/server/db"
 import { listWallets, signingAccount, unlockAccounts } from "@/lib/server/wallets"
@@ -104,7 +103,7 @@ async function add(args: Args) {
     passwordFile = resolve(process.env.GORILA_CALLER_CWD ?? process.cwd(), passwordArg)
     const mode = statSync(passwordFile).mode & 0o777
     if (process.platform !== "win32" && mode & 0o077) throw new CliError(`--password-file must not be readable by group or others: run chmod 600 ${passwordFile} (current permissions ${mode.toString(8)})`)
-    password = (await readFile(passwordFile, "utf8")).replace(/\r?\n$/, "")
+    password = await secret(passwordFile, "Wallet password")
   } else if (passwordArg) throw new CliError("This wallet has no password: omit --password-file")
   const unlocked = wallet.accounts[family] ? wallet : wallet.kind === "seed" && password ? await unlockAccounts(wallet.id, password) : undefined
   if (!unlocked?.accounts[family]) throw new CliError("Wallet has no account on the selected network")
