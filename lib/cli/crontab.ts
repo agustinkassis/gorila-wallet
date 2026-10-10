@@ -53,6 +53,8 @@ function without(text: string, id: string) {
     if (inside) { if (line.trim() === end(id)) inside = false; continue }
     kept.push(line)
   }
+  // An unterminated block would swallow every line after it: refuse instead of dropping foreign entries.
+  if (inside) throw new CliError(`crontab block for forward rule ${id} has no "${end(id)}" line: fix it with crontab -e`)
   return { text: kept.join("\n"), found }
 }
 

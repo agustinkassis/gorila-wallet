@@ -278,6 +278,10 @@ async function main() {
     assert.match((await invoke(["forward", "show", sweeping.rule.id], false)).error, /Unknown forward rule/)
     assert.equal((await invoke(["forward", "remove", fresh.rule.id])).result.cronRemoved, false)
     assert.equal((await invoke(["forward", "list"])).result.rules.length, 2)
+    const unterminated = `# BEGIN gorila-forward ${capped.rule.id}\n* * * * * forward run ${capped.rule.id}\n0 4 * * * /usr/bin/true # after\n`
+    await writeFile(crontabFile, unterminated)
+    assert.match((await invoke(["forward", "remove", capped.rule.id], false)).error, /no "# END gorila-forward/)
+    assert.equal(await readFile(crontabFile, "utf8"), unterminated)
     assert.match((await invoke(["balance", "--wallet", "fixture", "--electrum", "tcp://evil:1"], false)).error, /not valid/)
     console.log("CLI checks passed: all commands, shared database, secrets, satoshi balances, review/sign/broadcast fixtures, two-process cursor, foreign cwd and JSON")
   } finally {
