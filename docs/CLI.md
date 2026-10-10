@@ -96,9 +96,11 @@ saltadas y extiende el gap más allá del cursor. Los avances simultáneos de pr
 se serializan mediante una transacción de SQLite.
 
 `addresses` muestra recepción y cambio, índice, label, uso y conteo de txids
-distintos por cadena. Los labels de dirección se guardan con ámbito compartido
-`all`, visible en BTC y XBT. `address label` exige una dirección ya derivada para
-esa wallet; se puede ejecutar `addresses` para descubrirla.
+distintos por cadena. Los labels de dirección son por cadena, como en la web: la
+misma dirección puede tener un label en BTC y otro en XBT. `receive --label`,
+`addresses` y `address label` usan `--chain` (BTC por defecto). `address label`
+exige una dirección ya derivada para esa wallet; se puede ejecutar `addresses`
+para descubrirla.
 
 ## Balances, historial y estado
 

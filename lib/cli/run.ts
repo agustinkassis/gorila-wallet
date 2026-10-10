@@ -180,7 +180,7 @@ export async function runCli(argv: readonly string[]) {
     if (!wallet) throw new CliError("No wallet selected")
     const address = args.positionals[2]
     if (!await db.address.findFirst({ where: { walletId: wallet.id, address, family } })) throw new CliError("Address does not belong to this wallet; run addresses to discover it")
-    await setLabel(wallet.id, "all", "addr", address, args.positionals[3], null)
+    await setLabel(wallet.id, chainArg(args, "btc"), "addr", address, args.positionals[3], null)
     return { walletId: wallet.id, address, label: args.positionals[3] }
   }
   if (command === "tx-status" && !/^[0-9a-f]{64}$/i.test(args.positionals[1])) throw new CliError("TXID must be 64 hex characters")
@@ -207,7 +207,7 @@ export async function runCli(argv: readonly string[]) {
       const [addresses, states, labels] = await Promise.all([
         db.address.findMany({ where: { walletId: wallet.id, family }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
         db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: syncedChains(chains[0]) } } }),
-        db.label.findMany({ where: { walletId: wallet.id, type: "addr", chain: "all" } }),
+        db.label.findMany({ where: { walletId: wallet.id, type: "addr", chain: chainArg(args, "btc") } }),
       ])
       return { walletId: wallet.id, addresses: addresses.map((a) => ({ address: a.address, index: a.index, change: a.change, label: labels.find((l) => l.ref === a.address)?.label ?? null, chains: syncedChains(chains[0]).map((chain) => {
         const state = states.find((s) => s.address === a.address && s.chain === chain)

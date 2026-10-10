@@ -1,5 +1,4 @@
-import { nip98 } from "nostr-tools"
-import { requireNostr, watchAccess } from "@/lib/server/auth"
+import { requireNostr } from "@/lib/server/auth"
 import { getSettings, onSettings } from "@/lib/server/settings"
 import { currentSyncs, onSyncsChange, syncWatchers, type WalletSync } from "@/lib/server/watcher"
 import { listWallets, onWalletsChange } from "@/lib/server/wallets"
@@ -13,7 +12,6 @@ import type { StreamMessage } from "@/lib/wallet"
 export async function GET(req: Request) {
   const denied = await requireNostr(req)
   if (denied) return denied
-  const { pubkey } = await nip98.unpackEventFromToken(req.headers.get("authorization")!)
 
   let settings, wallets
   try {
@@ -57,12 +55,7 @@ export async function GET(req: Request) {
       const offSettings = onSettings((s) => send({ type: "settings", settings: s }))
       const offWallets = onWalletsChange(() => void listWallets().then((w) => send({ type: "wallets", wallets: w })))
       const ping = setInterval(() => write(": ping\n\n"), 25_000)
-      const offAccess = watchAccess(pubkey, () => {
-        cleanup()
-        try { controller.close() } catch {}
-      })
       cleanup = () => {
-        offAccess()
         clearInterval(ping)
         offSyncs()
         offSettings()

@@ -499,7 +499,7 @@ class WalletSync {
       db.addressState.findMany({ where: { walletId, chain } }),
       db.utxo.findMany({ where: { walletId, chain }, orderBy: { value: "desc" } }),
       db.tx.findMany({ where: { walletId, chain } }),
-      db.label.findMany({ where: { walletId, chain: { in: [chain, "all"] } } }),
+      db.label.findMany({ where: { walletId, chain } }),
     ])
     const state = new Map(states.map((s) => [s.address, s]))
     const label = new Map(labels.map((l) => [`${l.type}:${l.ref}`, l]))
