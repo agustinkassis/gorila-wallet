@@ -2,7 +2,9 @@
   "name": "gorilla-wallet",
   "version": "0.1.0",
   "private": true,
-  "bin": { "gorila": "bin/gorila.mjs" },
+  "bin": {
+    "gorila": "bin/gorila.mjs"
+  },
   "scripts": {
     "dev": "prisma migrate deploy && next dev",
     "build": "next build",
@@ -12,7 +14,8 @@
     "check": "DATABASE_URL=file:./data/check.db prisma migrate deploy >/dev/null && DATABASE_URL=file:./data/check.db tsx --conditions=react-server scripts/check.ts",
     "postinstall": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:cli:regtest": "node scripts/check-cli-regtest.mjs"
   },
   "dependencies": {
     "@ngraveio/bc-ur": "^1.1.13",

@@ -10,11 +10,11 @@ export async function secret(file: string | undefined, prompt: string, required 
     if (!required) return ""
     throw new CliError(`${prompt}: a terminal or an explicit secret file is required`)
   }
-  process.stderr.write(`${prompt}: `)
   const input = process.stdin
   input.setRawMode(true)
   input.resume()
   try {
+    process.stderr.write(`${prompt}: `)
     return await new Promise<string>((resolveInput, reject) => {
       let value = ""
       const decoder = new StringDecoder("utf8")

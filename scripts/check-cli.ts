@@ -88,8 +88,10 @@ async function main() {
     } else if (request.url?.endsWith("/status")) {
       if (failStatus) { response.writeHead(503); response.end() }
       else if (request.url.includes("aa".repeat(32))) response.end(JSON.stringify({ confirmed: true, block_height: 140 }))
-      else if (request.url.includes("bb".repeat(32))) response.end(JSON.stringify({ confirmed: false }))
+      else if (request.url.includes("bb".repeat(32)) || request.url.includes("dd".repeat(32))) response.end(JSON.stringify({ confirmed: false }))
       else { response.writeHead(404); response.end() }
+    } else if (request.url?.endsWith(`/api/tx/${"bb".repeat(32)}`)) {
+      response.end(JSON.stringify({ txid: "bb".repeat(32) }))
     } else if (request.url?.endsWith("/blocks/tip/height")) response.end("150")
     else { response.writeHead(404); response.end() }
   })
@@ -153,6 +155,7 @@ async function main() {
     assert.equal((await invoke(["tx-status", "aa".repeat(32), "--chain", "btc", "--wallet", "fixture"])).result.confirmations, 11)
     assert.equal((await invoke(["tx-status", "bb".repeat(32), "--chain", "btc", "--wallet", "fixture"])).result.confirmed, false)
     assert.equal((await invoke(["tx-status", "cc".repeat(32), "--chain", "btc", "--wallet", "fixture"])).result.found, false)
+    assert.equal((await invoke(["tx-status", "dd".repeat(32), "--chain", "btc", "--wallet", "fixture"])).result.found, false)
     failStatus = true
     assert.match((await invoke(["tx-status", "cc".repeat(32), "--chain", "btc", "--wallet", "fixture"], false)).error, /inaccessible/)
     failStatus = false

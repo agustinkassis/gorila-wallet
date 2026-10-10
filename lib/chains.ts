@@ -2,11 +2,12 @@
 import { NETWORK, TEST_NETWORK } from "@scure/btc-signer"
 
 /** Chains of one family share keys and address encoding: a wallet has one account per family. */
-export type Family = "main" | "test"
+export type Family = "main" | "test" | "regtest"
 type Network = typeof NETWORK
 
 export const FAMILIES: Record<Family, { label: string; network: Network; coinType: number }> = {
   main: { label: "Mainnet", network: NETWORK, coinType: 0 },
+  regtest: { label: "Regtest", network: { ...TEST_NETWORK, bech32: "bcrt" }, coinType: 1 },
   test: { label: "Testnet", network: TEST_NETWORK, coinType: 1 },
 }
 
@@ -32,9 +33,18 @@ export type ChainDef = {
   replayPair?: Chain
 }
 
-export type Chain = "btc" | "xbt" | "tbtc4" | "tbtc3" | "signet"
+export type Chain = "btc" | "xbt" | "tbtc4" | "tbtc3" | "signet" | "regtest"
 
 export const CHAINS: Record<Chain, ChainDef> = {
+  regtest: {
+    label: "Regtest",
+    unit: "BTC",
+    text: "text-gray-600 dark:text-gray-400",
+    bg: "bg-gray-500",
+    family: "regtest",
+    electrum: [],
+    mempool: [],
+  },
   btc: {
     label: "Bitcoin",
     unit: "BTC",
@@ -89,6 +99,7 @@ export const CHAINS: Record<Chain, ChainDef> = {
   },
 }
 export const CHAIN_IDS = Object.keys(CHAINS) as Chain[]
+export const WEB_CHAIN_IDS = CHAIN_IDS.filter((chain) => chain !== "regtest")
 
 export const isChain = (c: unknown): c is Chain => typeof c === "string" && Object.hasOwn(CHAINS, c)
 export const familyOf = (chain: Chain) => CHAINS[chain].family
@@ -102,6 +113,7 @@ export const familyPath = (path: string, family: Family) => path.replace(/^m\/(\
 
 /** The smallest OP_RETURN script `chain` accepts so its replay pair rejects it (Bitcoin: 84, Blake allows ≤ 83). */
 export function minDataScript(chain: Chain) {
+  if (chain === "regtest") return 84
   const pair = CHAINS[chain].replayPair
   const max = pair ? CHAINS[pair].maxDataScript : undefined
   return typeof max === "number" ? max + 1 : 0

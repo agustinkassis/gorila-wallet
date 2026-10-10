@@ -21,7 +21,7 @@ export class WatchOnlyError extends WalletError {
 
 const normalizeMnemonic = (m: string) => m.trim().toLowerCase().split(/\s+/).join(" ")
 const FAMILY_IDS = Object.keys(FAMILIES) as Family[]
-const DEFAULT_PATH: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'" }
+const DEFAULT_PATH: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'", regtest: "m/84'/1'/0'" }
 
 const masterKey = (mnemonic: string, passphrase: string) => HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic, passphrase))
 const accountAt = (master: HDKey, path: string): Account => ({ xpub: master.derive(path).publicExtendedKey, path, fingerprint: master.fingerprint })
@@ -172,7 +172,7 @@ export async function unlockAccounts(id: unknown, password: unknown) {
 }
 
 /** Watch-only wallet from an account xpub/zpub (mainnet) or tpub/vpub (testnets). Fingerprint optional (external signers). */
-export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?: unknown; fingerprint?: unknown }) {
+export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?: unknown; fingerprint?: unknown; family?: unknown }) {
   const name = checkName(o.name)
   let key: ReturnType<typeof normalizeXpub>
   try {
@@ -180,13 +180,15 @@ export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?
   } catch (e) {
     throw new WalletError((e as Error).message)
   }
+  const family = o.family === undefined ? key.family : checkFamily(o.family)
+  if (family !== key.family && !(family === "regtest" && key.family === "test")) throw new WalletError("Extended public key does not match the network family")
   const fp = typeof o.fingerprint === "string" && o.fingerprint.trim() ? o.fingerprint.trim() : ""
   if (fp && !/^[0-9a-fA-F]{8}$/.test(fp)) throw new WalletError("Master fingerprint is 8 hex characters")
   const id = randomUUID()
   await db.$transaction([
     db.wallet.create({ data: { id, name, kind: "watch" } }),
     db.walletAccount.create({
-      data: { walletId: id, family: key.family, xpub: key.xpub, path: checkPath(o.path, key.family), fingerprint: fp ? parseInt(fp, 16) : 0 },
+      data: { walletId: id, family, xpub: key.xpub, path: checkPath(o.path, family), fingerprint: fp ? parseInt(fp, 16) : 0 },
     }),
   ])
   changed()

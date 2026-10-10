@@ -41,7 +41,9 @@ La salida normal usa texto con nombres de campos.
 Cada consulta abre una sesión para las wallets y cadenas solicitadas, espera
 descubrimiento e historial frescos y cierra conexiones y timers al terminar. No
 cambia la red elegida en la web. `receive` y `addresses` sincronizan BTC y XBT para
-considerar el uso compartido de direcciones. La CLI opera sobre la familia mainnet.
+considerar el uso compartido de direcciones. BTC y XBT operan sobre la familia
+mainnet. `--chain regtest` selecciona una familia local independiente, con
+direcciones `bcrt1` y cuenta `m/84'/1'/0'`.
 
 ## Wallets y secretos
 
@@ -109,7 +111,10 @@ gorila tx-status TXID --wallet ahorro --chain btc
 
 Los balances muestran confirmado, pendiente y total en satoshis por wallet y
 moneda. BTC y XBT nunca se suman entre sí. `balance` usa `all` por defecto;
-`transactions`, `tx-status` y `send` exigen `--chain btc|xbt`.
+`transactions`, `tx-status` y `send` exigen `--chain btc|xbt|regtest`.
+`all` conserva su significado BTC + XBT; regtest se selecciona explícitamente.
+Una wallet cifrada anterior que aún no tenga cuenta regtest necesita desbloquearla
+una vez: los comandos de regtest aceptan `--password-file FILE` para habilitarla.
 
 El historial muestra txid, importe neto, fecha y confirmaciones. `tx-status`
 consulta primero el historial fresco de la wallet; para txids externos usa las
@@ -164,6 +169,60 @@ relleno hasta el tamaño mínimo. XBT rechaza `--message` y firma con
 `SIGHASH_UNIFIED` (`0x21`). Los servicios compartidos verifican claves, prevouts,
 outputs, monedas congeladas y límites de comisión; web y CLI aplican las mismas
 validaciones de publicación normal. Un rechazo de la red se devuelve como error.
+
+## Bitcoin regtest
+
+Regtest permite probar recepción, firma y publicación contra un nodo Bitcoin
+local. Los comandos usan la misma implementación que BTC, con direcciones
+`bcrt1`, firma SIGHASH_ALL y OP_RETURN de al menos 84 bytes en los envíos.
+Los cursores y datos de red están separados de mainnet y testnet.
+
+Configurá un servidor Electrum y una API compatible con mempool para tu nodo:
+
+```sh
+export DATABASE_URL=file:./data/regtest.db
+gorila config set --chain regtest \
+  --electrum tcp://127.0.0.1:50001 \
+  --mempool http://127.0.0.1:3000
+gorila wallet create --name prueba
+gorila receive --wallet prueba --chain regtest
+gorila wallet descriptor --wallet prueba --chain regtest
+gorila balance --wallet prueba --chain regtest
+gorila transactions --wallet prueba --chain regtest
+```
+
+También se pueden indicar las fuentes mediante `REGTEST_ELECTRUM` y
+`MEMPOOL_REGTEST_URL`; la configuración guardada tiene prioridad. El puerto HTTP
+debe ofrecer los endpoints `/api/...` usados por mempool; Esplora sin ese prefijo
+necesita un proxy que lo adapte.
+
+Tras financiar y confirmar la dirección desde tu nodo:
+
+```sh
+gorila send --wallet prueba --chain regtest --to bcrt1... \
+  --amount-sats 10000 --fee-rate 2 --message "prueba local"
+gorila tx-status TXID --wallet prueba --chain regtest
+```
+
+La suite automatizada prepara su propio nodo, indexador y base temporal:
+
+```sh
+pnpm check:cli:regtest
+```
+
+Requiere Node 24, las dependencias instaladas, Docker en ejecución, `curl` y Python 3 en
+macOS/Linux para los prompts en pseudoterminal. Usa fondos
+regtest, mina bloques y ejecuta el launcher real del CLI. Verifica las
+transacciones contra Bitcoin Core y elimina los recursos de su propia ejecución.
+Las pruebas BTC/XBT simuladas siguen disponibles mediante `pnpm check:cli`.
+
+Los resultados y transcripciones se guardan en `.omo/evidence/`; se puede cambiar
+la ubicación con `REGTEST_EVIDENCE_DIR`. El nodo de pruebas permite scripts
+OP_RETURN de hasta 1000 bytes para probar la protección BTC de 84 bytes.
+La prueba de reorganización reconstruye el índice local después de invalidar
+un bloque: la imagen fijada de Electrs falla al retroceder la cadena. El CLI
+conserva su SQLite durante esa reconstrucción y debe actualizar confirmaciones
+y balances al volver a sincronizar.
 
 ## Verificación
 

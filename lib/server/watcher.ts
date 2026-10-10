@@ -3,6 +3,7 @@ import { Transaction } from "@scure/btc-signer"
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js"
 import { config } from "@/lib/server/config"
 import { db } from "@/lib/server/db"
+import { Prisma } from "@/lib/generated/prisma/client"
 import { Electrum } from "@/lib/server/electrum"
 import { getSettings } from "@/lib/server/settings"
 import { listWallets } from "@/lib/server/wallets"
@@ -207,6 +208,7 @@ class WalletSync {
   private again = false
   private stopped = false
   private debounce?: NodeJS.Timeout
+  private contentionRetries = 0
 
   readonly account: Account
 
@@ -297,10 +299,20 @@ class WalletSync {
           if (added) this.again = true // new addresses may be used: re-check the gap after syncing them
           await this.publish()
         } while ((this.again || this.dirty.size > 0) && !this.stopped)
+        this.lastError = undefined
+        this.contentionRetries = 0
         this.fresh = !this.stopped && this.chain.connected
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error)
-        // connection dropped mid-sync: Electrum reconnects and kicks again
+        if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P1008" || error.code === "P2034") && this.contentionRetries < 10 && !this.stopped && this.chain.connected) {
+          clearTimeout(this.debounce)
+          // SQLite read-to-write upgrades can fail immediately, before the busy timeout.
+          const delay = Math.min(1000, 100 * 2 ** this.contentionRetries++)
+          this.debounce = setTimeout(() => {
+            if (!this.stopped && this.chain.connected) this.kick()
+          }, delay)
+        }
+        // Connection failures resume through Electrum's reconnect callback.
       } finally {
         this.running = false
       }

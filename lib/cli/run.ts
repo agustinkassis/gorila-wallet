@@ -6,34 +6,35 @@ import { secret, confirm } from "@/lib/cli/input"
 import { config } from "@/lib/server/config"
 import { db } from "@/lib/server/db"
 import { getSettings, parseSettings, saveSettings } from "@/lib/server/settings"
-import { createSeedWallet, exportSeed, exportDescriptors, listWallets } from "@/lib/server/wallets"
+import { createSeedWallet, exportSeed, exportDescriptors, listWallets, unlockAccounts } from "@/lib/server/wallets"
 import { receiveAddress } from "@/lib/server/receive"
 import { setLabel } from "@/lib/server/labels"
 import { openSyncSession } from "@/lib/server/watcher"
 import { signPsbt } from "@/lib/server/signer"
 import { broadcastHex, validateBroadcast } from "@/lib/server/broadcast"
 import { deriveAddress, type WalletInfo, type Snapshot } from "@/lib/wallet"
-import { CHAINS, type Chain } from "@/lib/chains"
+import { CHAINS, familyOf, syncedChains, type Chain } from "@/lib/chains"
 import { buildPsbt, feeAt, planTx, type Coin } from "@/lib/tx"
 
-export const HELP = `gorila - Bitcoin (BTC) and Blake2b (XBT), amounts in satoshis
+export const HELP = `gorila - Bitcoin (BTC), Blake2b (XBT) and local regtest, amounts in satoshis
 
 wallet list
 wallet create --name NAME [--words 12|24] [--password-file FILE] [--passphrase-file FILE]
 wallet import --name NAME [--seed-file FILE] [--password-file FILE] [--passphrase-file FILE]
 wallet export-seed [--include-passphrase] [--password-file FILE]
-wallet descriptor
-receive [--next] [--label TEXT]
-addresses
-address label ADDRESS TEXT
-balance [--chain btc|xbt|all] [--all-wallets]
-transactions --chain btc|xbt
-tx-status TXID --chain btc|xbt
+wallet descriptor [--chain btc|xbt|regtest]
+receive [--chain btc|xbt|regtest] [--next] [--label TEXT]
+addresses [--chain btc|xbt|regtest]
+address label ADDRESS TEXT [--chain btc|xbt|regtest]
+balance [--chain btc|xbt|regtest|all] [--all-wallets]
+transactions --chain btc|xbt|regtest
+tx-status TXID --chain btc|xbt|regtest
 config show
-config set --chain btc|xbt [--electrum URL ...] [--mempool URL ...]
-send --chain btc|xbt --to ADDRESS --amount-sats N [--message TEXT] [--fee-rate N] [--yes]
+config set --chain btc|xbt|regtest [--electrum URL ...] [--mempool URL ...]
+send --chain btc|xbt|regtest --to ADDRESS --amount-sats N [--message TEXT] [--fee-rate N] [--yes]
 
 Common: --wallet ID_OR_NAME, --json, --timeout SECONDS (default 120), --help
+Network commands accept --password-file FILE to enable a missing encrypted wallet account.
 Secrets use hidden terminal prompts or explicit files. --passphrase prompts for a BIP39 passphrase.
 `
 
@@ -42,9 +43,9 @@ const commandOptions: Record<string, readonly string[]> = {
   "wallet create": ["name", "words", "password-file", "passphrase-file", "passphrase"],
   "wallet import": ["name", "seed-file", "password-file", "passphrase-file", "passphrase"],
   "wallet export-seed": ["password-file", "include-passphrase"],
-  "wallet descriptor": [],
-  receive: ["label", "next"], addresses: [], "address label": [],
-  balance: ["chain", "all-wallets"], transactions: ["chain"], "tx-status": ["chain"],
+  "wallet descriptor": ["chain", "password-file"],
+  receive: ["label", "next", "chain", "password-file"], addresses: ["chain", "password-file"], "address label": ["chain", "password-file"],
+  balance: ["chain", "all-wallets", "password-file"], transactions: ["chain", "password-file"], "tx-status": ["chain", "password-file"],
   "config show": [], "config set": ["chain", "electrum", "mempool"],
   send: ["chain", "to", "amount-sats", "message", "fee-rate", "yes", "password-file"],
 }
@@ -53,15 +54,15 @@ function required(args: Args, name: string) {
   if (value === undefined || value === "") throw new CliError(`--${name} is required`)
   return value
 }
-function chainArg(args: Args): "btc" | "xbt" {
-  const chain = args.value("chain")
-  if (chain !== "btc" && chain !== "xbt") throw new CliError("--chain must be btc or xbt")
+function chainArg(args: Args, fallback?: "btc"): "btc" | "xbt" | "regtest" {
+  const chain = args.value("chain") ?? fallback
+  if (chain !== "btc" && chain !== "xbt" && chain !== "regtest") throw new CliError("--chain must be btc, xbt or regtest")
   return chain
 }
 const walletResult = (w: WalletInfo) => ({ id: w.id, name: w.name, kind: w.kind, watchOnly: w.watchOnly, needsPassword: w.needsPassword, passphrase: w.passphrase })
 const confirmations = (height: number, tip: number) => height > 0 ? Math.max(0, tip - height + 1) : 0
 
-async function transactionStatus(txid: string, chain: "btc" | "xbt", snapshots: Snapshot[], timeoutMs: number) {
+async function transactionStatus(txid: string, chain: Chain, snapshots: Snapshot[], timeoutMs: number) {
   const snapshot = snapshots.find((s) => s.chain === chain)
   const tx = snapshot?.txs.find((t) => t.txid === txid)
   if (tx && snapshot) return { chain, txid, found: true, confirmed: tx.height > 0, height: tx.height > 0 ? tx.height : null, confirmations: confirmations(tx.height, snapshot.height) }
@@ -75,7 +76,14 @@ async function transactionStatus(txid: string, chain: "btc" | "xbt", snapshots: 
       if (!res.ok) throw new CliError(`HTTP ${res.status}`)
       const status: unknown = await res.json()
       if (!status || typeof status !== "object" || !("confirmed" in status) || typeof status.confirmed !== "boolean") throw new CliError("Malformed transaction status")
-      if (!status.confirmed) return { chain, txid, found: true, confirmed: false, height: null, confirmations: 0 }
+      if (!status.confirmed) {
+        const transactionResponse = await fetch(`${base}/api/tx/${txid}`, { signal: AbortSignal.timeout(Math.min(timeoutMs, 10_000)) })
+        if (transactionResponse.status === 404) { missing = true; continue }
+        if (!transactionResponse.ok) throw new CliError(`Transaction HTTP ${transactionResponse.status}`)
+        const transaction: unknown = await transactionResponse.json()
+        if (!transaction || typeof transaction !== "object" || !("txid" in transaction) || transaction.txid !== txid) throw new CliError("Malformed transaction response")
+        return { chain, txid, found: true, confirmed: false, height: null, confirmations: 0 }
+      }
       if (!("block_height" in status) || typeof status.block_height !== "number" || !Number.isSafeInteger(status.block_height) || status.block_height <= 0) throw new CliError("Malformed block height")
       const tipResponse = await fetch(`${base}/api/blocks/tip/height`, { signal: AbortSignal.timeout(Math.min(timeoutMs, 10_000)) })
       if (!tipResponse.ok) throw new CliError(`Tip HTTP ${tipResponse.status}`)
@@ -106,7 +114,7 @@ export async function runCli(argv: readonly string[]) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs > 2_147_483_647) throw new CliError("timeout is too large")
   if (command === "config show") {
     const settings = await getSettings()
-    return { chains: (["btc", "xbt"] as const).map((chain) => {
+    return { chains: (["btc", "xbt", "regtest"] as const).map((chain) => {
       const sources = config.sources(chain, settings)
       const origin = (kind: "electrum" | "mempool", env: string) => settings.sources[chain]?.[kind]?.length ? "Settings" : process.env[env]?.split(",").some((v) => v.trim()) ? ".env/environment" : "defaults"
       return { chain, electrum: { urls: sources.electrum, source: origin("electrum", `${chain.toUpperCase()}_ELECTRUM`) }, mempool: { urls: sources.mempool, source: origin("mempool", `MEMPOOL_${chain.toUpperCase()}_URL`) } }
@@ -135,8 +143,25 @@ export async function runCli(argv: readonly string[]) {
   if (command === "wallet list") return { wallets: wallets.map(walletResult) }
   if (command === "balance" && args.flags.has("all-wallets") && args.value("wallet")) throw new CliError("Use --all-wallets or --wallet")
   const selected = command === "balance" && args.flags.has("all-wallets") ? wallets : command === "tx-status" && !wallets.length ? [] : [selectWallet(wallets, args.value("wallet"))]
+  let chains: Chain[] = ["btc", "xbt"]
+  if (command === "balance") {
+    const requested = args.value("chain") ?? "all"
+    chains = requested === "all" ? ["btc", "xbt"] : [chainArg(args)]
+  } else if (["transactions", "tx-status", "send"].includes(command)) chains = [chainArg(args)]
+  else if (args.value("chain")) chains = syncedChains(chainArg(args))
+  const family = familyOf(chains[0])
+  const passwords = new Map<string, string>()
+  if (command !== "wallet export-seed") {
+    for (let i = 0; i < selected.length; i++) {
+      const candidate = selected[i]
+      if (candidate.accounts[family]) continue
+      if (candidate.kind !== "seed") throw new CliError(`Wallet has no ${family} account`)
+      const password = await secret(args.value("password-file"), "Wallet password")
+      passwords.set(candidate.id, password)
+      selected[i] = await unlockAccounts(candidate.id, password)
+    }
+  }
   const wallet = selected[0]
-  if (wallet && !wallet.accounts.main && !command.startsWith("wallet ")) throw new CliError("Wallet has no mainnet account for BTC/XBT")
   if (command === "wallet export-seed") {
     if (!wallet) throw new CliError("No wallet selected")
     const password = wallet.needsPassword || args.value("password-file") ? await secret(args.value("password-file"), "Wallet password") : ""
@@ -144,23 +169,17 @@ export async function runCli(argv: readonly string[]) {
   }
   if (command === "wallet descriptor") {
     if (!wallet) throw new CliError("No wallet selected")
-    const account = wallet.accounts.main
-    if (!account) throw new CliError("Wallet has no mainnet account for BTC/XBT")
-    return { walletId: wallet.id, family: "main", fingerprint: account.fingerprint.toString(16).padStart(8, "0"), path: account.path, xpub: account.xpub, ...await exportDescriptors(wallet.id, "main") }
+    const account = wallet.accounts[family]
+    if (!account) throw new CliError("Wallet has no account on the selected network")
+    return { walletId: wallet.id, family, fingerprint: account.fingerprint.toString(16).padStart(8, "0"), path: account.path, xpub: account.xpub, ...await exportDescriptors(wallet.id, family) }
   }
   if (command === "address label") {
     if (!wallet) throw new CliError("No wallet selected")
     const address = args.positionals[2]
-    if (!await db.address.findUnique({ where: { walletId_address: { walletId: wallet.id, address } } })) throw new CliError("Address does not belong to this wallet; run addresses to discover it")
+    if (!await db.address.findFirst({ where: { walletId: wallet.id, address, family } })) throw new CliError("Address does not belong to this wallet; run addresses to discover it")
     await setLabel(wallet.id, "all", "addr", address, args.positionals[3], null)
     return { walletId: wallet.id, address, label: args.positionals[3] }
   }
-  let chains: Chain[] = ["btc", "xbt"]
-  if (command === "balance") {
-    const requested = args.value("chain") ?? "all"
-    if (requested !== "all" && requested !== "btc" && requested !== "xbt") throw new CliError("--chain must be btc, xbt or all")
-    chains = requested === "all" ? ["btc", "xbt"] : [requested]
-  } else if (["transactions", "tx-status", "send"].includes(command)) chains = [chainArg(args)]
   if (command === "tx-status" && !/^[0-9a-f]{64}$/i.test(args.positionals[1])) throw new CliError("TXID must be 64 hex characters")
   if (command === "send") {
     if (!wallet || wallet.watchOnly) throw new CliError("Watch-only wallets cannot sign")
@@ -180,14 +199,14 @@ export async function runCli(argv: readonly string[]) {
       return { walletId: s.walletId, chain: s.chain, currency: CHAINS[s.chain].unit, confirmed, pending, total: confirmed + pending }
     }) }
     if (!wallet) throw new CliError("No wallet selected")
-    if (command === "receive") return { walletId: wallet.id, ...await receiveAddress(wallet.id, "btc", { next: args.flags.has("next"), label: args.value("label") }) }
+    if (command === "receive") return { walletId: wallet.id, ...await receiveAddress(wallet.id, chainArg(args, "btc"), { next: args.flags.has("next"), label: args.value("label") }) }
     if (command === "addresses") {
       const [addresses, states, labels] = await Promise.all([
-        db.address.findMany({ where: { walletId: wallet.id, family: "main" }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
-        db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: ["btc", "xbt"] } } }),
+        db.address.findMany({ where: { walletId: wallet.id, family }, orderBy: [{ change: "asc" }, { index: "asc" }] }),
+        db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: syncedChains(chains[0]) } } }),
         db.label.findMany({ where: { walletId: wallet.id, type: "addr", chain: "all" } }),
       ])
-      return { walletId: wallet.id, addresses: addresses.map((a) => ({ address: a.address, index: a.index, change: a.change, label: labels.find((l) => l.ref === a.address)?.label ?? null, chains: (["btc", "xbt"] as const).map((chain) => {
+      return { walletId: wallet.id, addresses: addresses.map((a) => ({ address: a.address, index: a.index, change: a.change, label: labels.find((l) => l.ref === a.address)?.label ?? null, chains: syncedChains(chains[0]).map((chain) => {
         const state = states.find((s) => s.address === a.address && s.chain === chain)
         const history: [string, number][] = JSON.parse(state?.history ?? "[]")
         return { chain, used: state?.used ?? false, transactions: new Set(history.map(([txid]) => txid)).size }
@@ -206,22 +225,22 @@ export async function runCli(argv: readonly string[]) {
     const rate = args.value("fee-rate") ? Number(args.value("fee-rate")) : client.fees?.hourFee
     if (!rate || !Number.isFinite(rate) || rate < 1) throw new CliError("No fee estimate available: supply --fee-rate")
     if (client.fees && rate < client.fees.minimumFee) throw new CliError(`fee-rate is below the network minimum (${client.fees.minimumFee} sat/vB)`)
-    const account = wallet.accounts.main
-    if (!account) throw new CliError("Wallet has no mainnet account")
+    const account = wallet.accounts[family]
+    if (!account) throw new CliError("Wallet has no account on the selected network")
     const candidates: Coin[] = snapshot.utxos.filter((u) => !u.frozen).map((u) => {
       const address = snapshot.addresses.find((a) => a.address === u.address)
       if (!address) throw new CliError("UTXO address was not discovered")
       return { ...u, change: address.change, index: address.index }
     })
-    const usedChange = await db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: ["btc", "xbt"] }, used: true }, select: { address: true } })
+    const usedChange = await db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: syncedChains(chains[0]) }, used: true }, select: { address: true } })
     const used = new Set(usedChange.map((a) => a.address))
     let changeIndex = 0
-    while (used.has(deriveAddress(account.xpub, 1, changeIndex, "main").address)) changeIndex++
-    const plan = planTx({ chain, recipients: [{ address: required(args, "to"), amount: positiveInteger(args.value("amount-sats"), "amount-sats") }], candidates, fee: feeAt(rate), changeAddress: deriveAddress(account.xpub, 1, changeIndex, "main").address, ...(chain === "btc" ? { data: new TextEncoder().encode(args.value("message") ?? "") } : {}) })
+    while (used.has(deriveAddress(account.xpub, 1, changeIndex, family).address)) changeIndex++
+    const plan = planTx({ chain, recipients: [{ address: required(args, "to"), amount: positiveInteger(args.value("amount-sats"), "amount-sats") }], candidates, fee: feeAt(rate), changeAddress: deriveAddress(account.xpub, 1, changeIndex, family).address, ...(chain !== "xbt" ? { data: new TextEncoder().encode(args.value("message") ?? "") } : {}) })
     const review = { walletId: wallet.id, chain, inputs: plan.inputs, outputs: plan.outputs.map((o) => ({ kind: o.kind, address: o.address ?? null, amount: o.amount, script: bytesToHex(o.script) })), fee: plan.fee, vsize: plan.vsize, feeRate: rate }
     process.stderr.write(`${JSON.stringify(review, null, 2)}\n`)
     if (!args.flags.has("yes")) await confirm()
-    const password = wallet.needsPassword || args.value("password-file") ? await secret(args.value("password-file"), "Wallet password") : ""
+    const password = passwords.get(wallet.id) ?? (wallet.needsPassword || args.value("password-file") ? await secret(args.value("password-file"), "Wallet password") : "")
     const psbt = buildPsbt(plan, { chain, xpub: account.xpub, fingerprint: account.fingerprint, accountPath: account.path, tipHeight: snapshot.height }).toPSBT()
     const signed = await signPsbt(wallet.id, chain, psbt, password, client)
     validateBroadcast(chain, signed.hex)

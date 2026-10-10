@@ -149,6 +149,7 @@ needs System Settings → Privacy & Security → Open Anyway on macOS, and More 
 | `pnpm build` | Production build |
 | `pnpm check` | Self-checks: SIGHASH_UNIFIED vectors, signing round trips, coin selection, fee math, NIP-98 |
 | `pnpm check:cli` | CLI and core checks against isolated SQLite and simulated Electrum/mempool servers |
+| `pnpm check:cli:regtest` | CLI end-to-end checks against isolated Bitcoin Core and Electrum/Esplora in Docker, with mined confirmations |
 | `pnpm lint` | ESLint |
 | `pnpm db:migrate` | Apply Prisma migrations |
 | `pnpm tauri build` | Desktop app for this OS/arch (see above) |

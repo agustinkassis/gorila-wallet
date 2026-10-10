@@ -59,7 +59,7 @@ model Address {
   scripthash String
 
   @@id([walletId, address])
-  @@unique([walletId, scripthash])
+  @@unique([walletId, family, scripthash])
   @@unique([walletId, family, change, index])
 }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import net from "node:net"
+import { spawn } from "node:child_process"
 import http from "node:http"
 import { once } from "node:events"
 import { HDKey } from "@scure/bip32"
@@ -105,6 +106,32 @@ async function main() {
     active = undefined
     console.log("PASS unavailable HTTP fee source falls back to fresh Electrum estimates")
     console.log("PASS shared freeze remains effective with overlapping chain-specific labels")
+
+    // Given a writer holding SQLite longer than its busy timeout, when syncing, then this session retries after release.
+    await db.address.deleteMany({ where: { walletId: wallet.id } })
+    const databaseUrl = process.env.DATABASE_URL
+    assert.ok(databaseUrl)
+    const locker = spawn(process.execPath, ["-e", `
+      const Database = require("better-sqlite3")
+      const database = new Database(process.argv[1])
+      database.exec("BEGIN IMMEDIATE")
+      process.stdout.write("locked\\n")
+      setTimeout(() => { database.exec("ROLLBACK"); database.close() }, 6500)
+    `, databaseUrl.replace(/^file:/, "")], { stdio: ["ignore", "pipe", "pipe"] })
+    const lockerExit = once(locker, "exit")
+    try {
+      await once(locker.stdout, "data")
+      const recovered = await openSyncSession([wallet], ["btc"], 15_000)
+      active = recovered
+      assert.equal(recovered.snapshots()[0].synced, true)
+      assert.equal(recovered.client("btc").syncs.get(wallet.id)?.lastError, undefined)
+      assert.equal((await lockerExit)[0], 0)
+      await recovered.close()
+      active = undefined
+      console.log("PASS same sync session recovers after real SQLite writer exceeds busy timeout and clears lastError")
+    } finally {
+      if (locker.exitCode === null) locker.kill()
+    }
   } finally {
     await active?.close()
     for (const socket of sockets) socket.destroy()
