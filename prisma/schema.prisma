@@ -23,12 +23,6 @@ model Wallet {
   createdAt   DateTime @default(now())
 }
 
-/// Nostr pubkeys allowed to log in (besides ALLOWED_PUBKEYS). With neither, the first login claims ownership.
-model Account {
-  pubkey    String   @id
-  createdAt DateTime @default(now())
-}
-
 /// A wallet's account key per family of chains (main: coin type 0', test: 1'). xpub stored with mainnet version bytes.
 model WalletAccount {
   walletId    String
