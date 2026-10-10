@@ -14,7 +14,7 @@ import { signPsbt } from "@/lib/server/signer"
 import { broadcastHex, validateBroadcast } from "@/lib/server/broadcast"
 import { deriveAddress, type WalletInfo, type Snapshot } from "@/lib/wallet"
 import { CHAINS, familyOf, syncedChains, type Chain } from "@/lib/chains"
-import { buildPsbt, feeAt, planTx, type Coin } from "@/lib/tx"
+import { INPUT_VSIZE, buildPsbt, feeAt, planTx, type Coin } from "@/lib/tx"
 
 export const HELP = `gorila - Bitcoin (BTC), Blake2b (XBT) and local regtest, amounts in satoshis
 
@@ -155,7 +155,10 @@ export async function runCli(argv: readonly string[]) {
     for (let i = 0; i < selected.length; i++) {
       const candidate = selected[i]
       if (candidate.accounts[family]) continue
-      if (candidate.kind !== "seed") throw new CliError(`Wallet has no ${family} account`)
+      if (candidate.kind !== "seed") {
+        if (command === "balance" && args.flags.has("all-wallets")) continue // e.g. a testnet-only watch wallet
+        throw new CliError(`Wallet has no ${family} account`)
+      }
       const password = await secret(args.value("password-file"), "Wallet password")
       passwords.set(candidate.id, password)
       selected[i] = await unlockAccounts(candidate.id, password)
@@ -227,11 +230,12 @@ export async function runCli(argv: readonly string[]) {
     if (client.fees && rate < client.fees.minimumFee) throw new CliError(`fee-rate is below the network minimum (${client.fees.minimumFee} sat/vB)`)
     const account = wallet.accounts[family]
     if (!account) throw new CliError("Wallet has no account on the selected network")
+    // Same pool as the web send page: not frozen, confirmed (or our own unconfirmed change), worth more than it costs to spend.
     const candidates: Coin[] = snapshot.utxos.filter((u) => !u.frozen).map((u) => {
       const address = snapshot.addresses.find((a) => a.address === u.address)
       if (!address) throw new CliError("UTXO address was not discovered")
       return { ...u, change: address.change, index: address.index }
-    })
+    }).filter((c) => (c.height > 0 || c.change === 1) && c.value > rate * INPUT_VSIZE)
     const usedChange = await db.addressState.findMany({ where: { walletId: wallet.id, chain: { in: syncedChains(chains[0]) }, used: true }, select: { address: true } })
     const used = new Set(usedChange.map((a) => a.address))
     let changeIndex = 0
