@@ -100,14 +100,21 @@ class ChainClient {
 
   /** Raw tx hex: SQLite cache first, then Electrum (and cache it — raw txs never change). */
   async rawHex(txid: string) {
+    if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Invalid transaction ID")
+    // Servers are untrusted, and older versions cached their answers unchecked: the bytes must hash to the txid.
+    const matches = (hex: unknown): hex is string => {
+      try {
+        return typeof hex === "string" && parseTx(hex).id === txid
+      } catch {
+        return false
+      }
+    }
     const where = { chain_txid: { chain: this.chain, txid } }
     const row = await db.rawTx.findUnique({ where })
-    if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Invalid transaction ID")
-    const hex = row?.hex ?? await this.client.request<string>("blockchain.transaction.get", [txid])
-    // Recheck old cache entries too: older versions trusted arbitrary Electrum responses.
-    if (typeof hex !== "string" || hex.length > 8_000_000 || parseTx(hex).id !== txid) throw new Error("Transaction ID mismatch")
-    if (row) return hex
-    await db.rawTx.upsert({ where, create: { chain: this.chain, txid, hex }, update: {} })
+    if (row && matches(row.hex)) return row.hex
+    const hex = await this.client.request<unknown>("blockchain.transaction.get", [txid])
+    if (!matches(hex)) throw new Error("Transaction ID mismatch")
+    await db.rawTx.upsert({ where, create: { chain: this.chain, txid, hex }, update: { hex } })
     return hex
   }
 
