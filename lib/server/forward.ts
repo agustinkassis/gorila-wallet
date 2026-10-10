@@ -47,10 +47,11 @@ export async function runForward(id: string, o: { dryRun?: boolean; timeoutMs: n
   if (!rule) throw new ForwardError(`Unknown forward rule: ${id}`)
   const dryRun = !!o.dryRun
   const start = new Date()
+  const until = new Date(start.getTime() + o.timeoutMs + 60_000)
   if (!dryRun) {
     const lease = await db.forwardRule.updateMany({
       where: { id, OR: [{ runningUntil: null }, { runningUntil: { lt: start } }] },
-      data: { runningUntil: new Date(start.getTime() + o.timeoutMs + 60_000) },
+      data: { runningUntil: until },
     })
     if (!lease.count) return { ruleId: id, status: "busy" as const }
   }
@@ -124,6 +125,7 @@ export async function runForward(id: string, o: { dryRun?: boolean; timeoutMs: n
     throw error
   } finally {
     await session?.close()
-    if (!dryRun) await db.forwardRule.update({ where: { id }, data: { runningUntil: null, lastCheckedAt: new Date() } }).catch(() => {})
+    // Release only our own lease: if it expired and another run took the rule, that run keeps it.
+    if (!dryRun) await db.forwardRule.updateMany({ where: { id, runningUntil: until }, data: { runningUntil: null, lastCheckedAt: new Date() } }).catch(() => {})
   }
 }
