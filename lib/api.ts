@@ -11,7 +11,7 @@ export async function api<T = unknown>(path: string, body?: object): Promise<T> 
   const url = `${location.origin}${path}`
   const method = body ? "POST" : "GET"
   const nostr = await waitForNostr()
-  const auth = await nip98.getToken(url, method, (e) => nostr.signEvent(e), true, body)
+  const auth = await nip98.getToken(url, method, (e) => nostr.signEvent({ ...e, tags: [...e.tags, ["nonce", crypto.randomUUID()]] }), true, body)
   const res = await fetch(url, {
     method,
     headers: { Authorization: auth, ...(body ? { "Content-Type": "application/json" } : {}) },

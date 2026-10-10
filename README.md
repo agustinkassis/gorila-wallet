@@ -116,6 +116,7 @@ Copy `.env.example` to `.env` only to change a default.
 | `DERIVATION_PATH` | Its account path, default `m/84'/0'/0'` (P2WPKH) |
 | `ALLOWED_PUBKEYS` | Optional npub/hex allowlist. Without it the first login is the owner (Settings → Access) |
 | `<CHAIN>_ELECTRUM` | Comma-separated `tcp://` / `ssl://` Electrum servers, tried in order (`BTC_ELECTRUM`, `XBT_ELECTRUM`, `TBTC4_ELECTRUM`, …). Settings → Networks overrides it |
+| `ELECTRUM_SELF_SIGNED` | Comma-separated Electrum hosts whose `ssl://` certificate isn't verified (a self-signed node you trust). Every other `ssl://` server needs a valid certificate |
 | `MEMPOOL_<CHAIN>_URL` | mempool.space-compatible APIs: fees, broadcast, explorer links (`MEMPOOL_BTC_URL`, …) |
 | `DATABASE_URL` | SQLite file (default `file:./data/wallet.db`) |
 
@@ -153,7 +154,9 @@ needs System Settings → Privacy & Security → Open Anyway on macOS, and More 
 
 - The backend signs only inputs that are provably this wallet's coins (derivation path, fingerprint and script checked
   against the real parent transaction), refuses frozen coins and chain-rule violations, and caps fee rates.
-- POST bodies are bound to the NIP-98 signature (`payload` tag), so a captured token can't carry a different body.
+- POST bodies are bound to the NIP-98 signature (`payload` tag). Each write event is accepted once, including across restarts; clients must sign a fresh event for retries.
+- `ssl://` Electrum servers must present a valid certificate, except hosts listed in `ELECTRUM_SELF_SIGNED`; `tcp://`
+  servers are unauthenticated. Raw transactions are checked against their txid, from the network and from the cache.
 - Software wallets with a password store their recovery words only encrypted with it; a stolen database can't spend
   them. Wallets created without a password can be spent by anyone with the database.
   Watch-only wallets can't sign. `.env` and `data/` are git-ignored.

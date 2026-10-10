@@ -24,8 +24,12 @@ export async function POST(req: Request) {
   }
   if (body.action === "add") await db.account.upsert({ where: { pubkey }, create: { pubkey }, update: {} })
   else if (body.action === "remove") {
-    if (!envPubkeys().size && (await db.account.count()) <= 1) return Response.json({ error: "Can't remove the last key that can log in" }, { status: 422 })
-    await db.account.deleteMany({ where: { pubkey } })
+    const removed = await db.$transaction(async (tx) => {
+      if (!envPubkeys().size && (await tx.account.count()) <= 1) return false
+      await tx.account.deleteMany({ where: { pubkey } })
+      return true
+    })
+    if (!removed) return Response.json({ error: "Can't remove the last key that can log in" }, { status: 422 })
   } else return Response.json({ error: "Unknown action" }, { status: 400 })
   return Response.json(await list())
 }
