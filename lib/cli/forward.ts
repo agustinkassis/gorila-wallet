@@ -12,6 +12,7 @@ import { listWallets, signingAccount, unlockAccounts } from "@/lib/server/wallet
 import { runForward } from "@/lib/server/forward"
 import { familyOf, type Chain } from "@/lib/chains"
 import { opReturnScript, PlanError, scriptFor } from "@/lib/tx"
+import { bytesToHex } from "@noble/hashes/utils.js"
 import type { ForwardRule, ForwardRun } from "@/lib/generated/prisma/client"
 
 function required(args: Args, name: string) {
@@ -78,8 +79,10 @@ async function add(args: Args) {
   const family = familyOf(chain)
   const from = required(args, "from").trim()
   const to = required(args, "to").trim()
-  if (from === to) throw new CliError("--from and --to are the same address")
-  try { scriptFor(to, chain) } catch (error) { throw new CliError(error instanceof Error ? error.message : String(error)) }
+  // Compare scripts, not strings: an upper-case bech32 copy of --from would otherwise sweep A to itself every run.
+  let same: boolean
+  try { same = bytesToHex(scriptFor(from, chain)) === bytesToHex(scriptFor(to, chain)) } catch (error) { throw new CliError(error instanceof Error ? error.message : String(error)) }
+  if (same) throw new CliError("--from and --to are the same address")
   const every = positiveInteger(required(args, "every"), "every")
   const cron = schedule(every)
   const minConfValue = args.value("min-conf") ?? "1"

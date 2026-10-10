@@ -198,6 +198,7 @@ async function main() {
     assert.match((await invoke(rule(["--yes"], { chain: "xbt" }), false)).error, /OP_RETURN/)
     assert.match((await invoke(rule(["--yes"], { from: foreign }), false)).error, /does not belong/)
     assert.match((await invoke(rule(["--yes"], { to: address }), false)).error, /same address/)
+    assert.match((await invoke(rule(["--yes"], { to: address.toUpperCase() }), false)).error, /same address/)
     assert.match((await invoke(rule(["--yes"], { every: "7" }), false)).error, /--every/)
     assert.match((await invoke(rule(["--yes"], { cap: "0" }), false)).error, /max-fee-rate/)
     const lockedAddress = (await invoke(["addresses", "--wallet", created.wallet.id])).result.addresses[0].address
