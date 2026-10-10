@@ -20,7 +20,8 @@ export function loginRequired() {
 export async function authHeaders(url: string, method: string, body?: object): Promise<Record<string, string>> {
   if (!(await loginRequired())) return {}
   const nostr = await waitForNostr()
-  return { Authorization: await nip98.getToken(url, method, (e) => nostr.signEvent(e), true, body) }
+  // a nonce makes every event unique: the server refuses a reused event id on writes (replay protection)
+  return { Authorization: await nip98.getToken(url, method, (e) => nostr.signEvent({ ...e, tags: [...e.tags, ["nonce", crypto.randomUUID()]] }), true, body) }
 }
 
 /** Call to our backend, NIP-98 signed when login is on. Throws an Error with the server's message on failure. */

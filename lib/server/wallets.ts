@@ -5,6 +5,7 @@ import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39"
 import { wordlist } from "@scure/bip39/wordlists/english.js"
 import { FAMILIES, familyPath, type Family } from "@/lib/chains"
 import { config } from "@/lib/server/config"
+import { accountDescriptors } from "@/lib/descriptors"
 import { db } from "@/lib/server/db"
 import { isLocked, seal, unseal } from "@/lib/server/secret"
 import { DERIVATION_PATH, parseAccountKey, type Account, type WalletInfo, type WalletKind } from "@/lib/wallet"
@@ -20,7 +21,7 @@ export class WatchOnlyError extends WalletError {
 
 const normalizeMnemonic = (m: string) => m.trim().toLowerCase().split(/\s+/).join(" ")
 const FAMILY_IDS = Object.keys(FAMILIES) as Family[]
-const DEFAULT_PATH: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'" }
+const DEFAULT_PATH: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'", regtest: "m/84'/1'/0'" }
 
 const masterKey = (mnemonic: string, passphrase: string) => HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic, passphrase))
 const accountAt = (master: HDKey, path: string): Account => ({ xpub: master.derive(path).publicExtendedKey, path, fingerprint: master.fingerprint })
@@ -85,6 +86,7 @@ const wipeCache = (walletId: string) =>
     db.addressState.deleteMany({ where: { walletId } }),
     db.utxo.deleteMany({ where: { walletId } }),
     db.tx.deleteMany({ where: { walletId } }),
+    db.receiveCursor.deleteMany({ where: { walletId } }),
   ])
 
 /** A software wallet's missing family accounts, derived from its seed (unsealed with `password` for this call only). */
@@ -170,7 +172,7 @@ export async function unlockAccounts(id: unknown, password: unknown) {
 }
 
 /** Watch-only wallet from an account xpub/zpub (mainnet) or tpub/vpub (testnets). Fingerprint optional (external signers). */
-export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?: unknown; fingerprint?: unknown }) {
+export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?: unknown; fingerprint?: unknown; family?: unknown }) {
   const name = checkName(o.name)
   let key: ReturnType<typeof parseAccountKey>
   try {
@@ -178,6 +180,8 @@ export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?
   } catch (e) {
     throw new WalletError((e as Error).message)
   }
+  const family = o.family === undefined ? key.family : checkFamily(o.family)
+  if (family !== key.family && !(family === "regtest" && key.family === "test")) throw new WalletError("Extended public key does not match the network family")
   // typed fields win over the key's origin; without either the wallet still works, the fingerprint can be added later
   const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined)
   const fp = checkFingerprint(text(o.fingerprint) ?? key.fingerprint)
@@ -185,7 +189,7 @@ export async function importWatchWallet(o: { name: unknown; xpub: unknown; path?
   await db.$transaction([
     db.wallet.create({ data: { id, name, kind: "watch" } }),
     db.walletAccount.create({
-      data: { walletId: id, family: key.family, xpub: key.xpub, path: checkPath(text(o.path) ?? key.path, key.family), fingerprint: fp },
+      data: { walletId: id, family, xpub: key.xpub, path: checkPath(text(o.path) ?? key.path, family), fingerprint: fp },
     }),
   ])
   changed()
@@ -252,4 +256,29 @@ export async function signingAccount(id: unknown, family: Family, password?: unk
       return { privateKey: k.privateKey!, publicKey: k.publicKey! }
     },
   }
+}
+
+/** Recovery material is only returned by an explicit export call, never by wallet metadata. */
+export async function exportSeed(id: unknown, password?: unknown, includePassphrase = false): Promise<{ mnemonic: string; passphrase?: string }> {
+  const wallet = await getWallet(id)
+  if (wallet.kind === "watch") throw new WalletError("Watch-only wallets have no recovery words to export")
+  let secret: { mnemonic: string; passphrase: string }
+  if (wallet.kind === "env") {
+    if (!config.seedPhrase) throw new WalletError("No environment seed configured")
+    secret = { mnemonic: normalizeMnemonic(config.seedPhrase), passphrase: "" }
+  } else {
+    const pw = typeof password === "string" ? password : ""
+    if (wallet.needsPassword && !pw) throw new WalletError("Enter the wallet password to export recovery words")
+    const row = await db.wallet.findUniqueOrThrow({ where: { id: wallet.id } })
+    if (!row.encSeed) throw new WalletError("Wallet has no recovery words")
+    secret = JSON.parse(await unseal(row.encSeed, pw))
+  }
+  return { mnemonic: secret.mnemonic, ...(includePassphrase ? { passphrase: secret.passphrase } : {}) }
+}
+
+export async function exportDescriptors(id: unknown, family: Family) {
+  const wallet = await getWallet(id)
+  const account = wallet.accounts[family]
+  if (!account) throw new WalletError(`This wallet isn't enabled on ${FAMILIES[family].label} yet`)
+  return accountDescriptors(account, family)
 }

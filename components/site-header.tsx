@@ -29,7 +29,7 @@ import { WatchOnlyBadge } from "@/components/wallet-switcher"
 import { api } from "@/lib/api"
 import { canNotify, requestNotifications } from "@/lib/notify"
 import { cn } from "@/lib/utils"
-import { CHAINS, CHAIN_IDS, isChain, pendingIncoming } from "@/lib/wallet"
+import { CHAINS, WEB_CHAIN_IDS, isChain, pendingIncoming } from "@/lib/wallet"
 
 export const shorten = (s: string, n = 8) => (s.length > n * 2 + 1 ? `${s.slice(0, n)}…${s.slice(-n)}` : s)
 
@@ -124,7 +124,7 @@ function NetworkSwitcher() {
       <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel className="text-xs text-muted-foreground">Network</DropdownMenuLabel>
         <DropdownMenuRadioGroup value={chain} onValueChange={change}>
-          {CHAIN_IDS.filter((c) => c === chain || !settings.hidden.includes(c)).map((c) => (
+          {WEB_CHAIN_IDS.filter((c) => c === chain || !settings.hidden.includes(c)).map((c) => (
             <DropdownMenuRadioItem key={c} value={c} className="gap-2">
               <span className={cn("size-2 rounded-full", CHAINS[c].bg)} />
               <span className="flex-1">{CHAINS[c].label}</span>

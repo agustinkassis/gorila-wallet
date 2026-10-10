@@ -318,8 +318,9 @@ const throws = async (fn: () => unknown, re: RegExp) => {
   assert.equal((await requireNostr(req(await tokenFor(allowed, "http://evil.example/api/stream"))))?.status, 401)
   const body = { chain: "btc", hex: "00" }
   const posted = await tokenFor(allowed, url, "POST", body)
-  assert.equal(await requireNostr(req(posted, "POST"), body), null)
   assert.equal((await requireNostr(req(posted, "POST"), { ...body, hex: "01" }))?.status, 401, "tampered body rejected")
+  assert.equal(await requireNostr(req(posted, "POST"), body), null)
+  assert.equal((await requireNostr(req(posted, "POST"), body))?.status, 401, "replayed write rejected")
   assert.equal((await requireNostr(req(await tokenFor(allowed, url, "POST"), "POST"), body))?.status, 401, "POST without payload tag rejected")
 
   console.log("all checks passed")

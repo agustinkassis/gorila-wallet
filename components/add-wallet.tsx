@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils"
 type Mode = "choose" | "create" | "words" | "xpub"
 const WORDS = new Set(wordlist)
 /** BIP84 account 0 per family: coin type 0' on mainnet, 1' on testnets and signet */
-const DEFAULT_PATHS: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'" }
+const DEFAULT_PATHS: Record<Family, string> = { main: "m/84'/0'/0'", test: "m/84'/1'/0'", regtest: "m/84'/1'/0'" }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (

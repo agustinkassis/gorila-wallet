@@ -47,6 +47,9 @@ other machines, set `ALLOWED_PUBKEYS` and run `pnpm db:migrate && pnpm next star
 
 ## Wallets
 
+For local terminal use without starting Next.js, install `gorila` with
+`pnpm link --global`. See [CLI installation, commands and examples](docs/CLI.md).
+
 Switch wallets from the top of the sidebar; add more with **Add wallet** (Sparrow-style):
 
 - **Create**: new 12/24 recovery words generated in the browser, a backup check, optional BIP39 passphrase.
@@ -123,6 +126,7 @@ Copy `.env.example` to `.env` only to change a default.
 | `DERIVATION_PATH` | Its account path, default `m/84'/0'/0'` (P2WPKH) |
 | `ALLOWED_PUBKEYS` | Optional npub/hex allowlist. Set: every API call needs a NIP-98 login from one of these keys. Unset: no login, localhost only |
 | `<CHAIN>_ELECTRUM` | Comma-separated `tcp://` / `ssl://` Electrum servers, tried in order (`BTC_ELECTRUM`, `XBT_ELECTRUM`, `TBTC4_ELECTRUM`, …). Settings → Networks overrides it |
+| `ELECTRUM_SELF_SIGNED` | Comma-separated Electrum hosts whose `ssl://` certificate isn't verified (a self-signed node you trust). Every other `ssl://` server needs a valid certificate |
 | `MEMPOOL_<CHAIN>_URL` | mempool.space-compatible APIs: fees, broadcast, explorer links (`MEMPOOL_BTC_URL`, …) |
 | `DATABASE_URL` | SQLite file (default `file:./data/wallet.db`) |
 
@@ -191,6 +195,8 @@ variables → Actions); without them it builds ad-hoc signed, as before.
 | `pnpm dev` / `pnpm start` | Migrate, then run (dev / production) |
 | `pnpm build` | Production build |
 | `pnpm check` | Self-checks: SIGHASH_UNIFIED vectors, signing round trips, coin selection, fee math, NIP-98 |
+| `pnpm check:cli` | CLI and core checks against isolated SQLite and simulated Electrum/mempool servers |
+| `pnpm check:cli:regtest` | CLI end-to-end checks against isolated Bitcoin Core and Electrum/Esplora in Docker, with mined confirmations |
 | `pnpm lint` | ESLint |
 | `pnpm db:migrate` | Apply Prisma migrations |
 | `pnpm tauri build` | Desktop app for this OS/arch (see above) |
@@ -199,7 +205,9 @@ variables → Actions); without them it builds ad-hoc signed, as before.
 
 - The backend signs only inputs that are provably this wallet's coins (derivation path, fingerprint and script checked
   against the real parent transaction), refuses frozen coins and chain-rule violations, and caps fee rates.
-- POST bodies are bound to the NIP-98 signature (`payload` tag), so a captured token can't carry a different body.
+- POST bodies are bound to the NIP-98 signature (`payload` tag). Each write event is accepted once, including across restarts; clients must sign a fresh event for retries.
+- `ssl://` Electrum servers must present a valid certificate, except hosts listed in `ELECTRUM_SELF_SIGNED`; `tcp://`
+  servers are unauthenticated. Raw transactions are checked against their txid, from the network and from the cache.
 - Software wallets with a password store their recovery words only encrypted with it; a stolen database can't spend
   them. Wallets created without a password can be spent by anyone with the database.
   Watch-only wallets can't sign. `.env` and `data/` are git-ignored.

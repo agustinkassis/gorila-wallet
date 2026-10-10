@@ -5,7 +5,7 @@ import { bytesToHex, concatBytes } from "@noble/hashes/utils.js"
 import { createBase58check } from "@scure/base"
 import { CHAINS, networkOf, type Chain, type Family } from "@/lib/chains"
 
-export { CHAINS, CHAIN_IDS, FAMILIES, familyOf, isChain, syncedChains, type Chain, type Family } from "@/lib/chains"
+export { CHAINS, CHAIN_IDS, WEB_CHAIN_IDS, FAMILIES, familyOf, isChain, syncedChains, type Chain, type Family } from "@/lib/chains"
 
 /** Addresses shown on the dashboard (receive chain). Discovery goes further, up to the gap limit. */
 export const ADDRESS_COUNT = 10

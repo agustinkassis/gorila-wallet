@@ -34,6 +34,15 @@ model WalletAccount {
   @@id([walletId, family])
 }
 
+/// Current receive address, shared by all chains in the wallet's network family.
+model ReceiveCursor {
+  walletId String
+  family   String
+  index    Int    @default(0)
+
+  @@id([walletId, family])
+}
+
 /// Addresses derived from a wallet's account on a family (shared by that family's chains, e.g. Bitcoin and Blake).
 model Address {
   walletId   String
@@ -44,7 +53,7 @@ model Address {
   scripthash String
 
   @@id([walletId, address])
-  @@unique([walletId, scripthash])
+  @@unique([walletId, family, scripthash])
   @@unique([walletId, family, change, index])
 }
 
@@ -125,4 +134,12 @@ model Label {
 model Setting {
   key   String @id
   value String // JSON
+}
+
+/// Consumed NIP-98 writes. Expired rows are removed on the next authorized write.
+model AuthEvent {
+  id        String @id
+  expiresAt Int
+
+  @@index([expiresAt])
 }
