@@ -145,8 +145,10 @@ Builds are native (Node and better-sqlite3 are bundled for the host), so each OS
 `.github/workflows/desktop.yml` builds macOS (arm64, x64), Windows (x64, arm64) and Linux (x64, arm64) as workflow
 artifacts; a `v*` tag also creates a draft release (see [Releasing](#releasing)). macOS builds are Developer ID signed
 and notarized when the secrets below exist (ad-hoc signed otherwise, except on a tag, which fails); Windows installers
-are unsigned (SmartScreen: More info → Run anyway). App icon gorilla:
-[Twemoji](https://github.com/jdecked/twemoji), CC-BY 4.0.
+are unsigned (SmartScreen: More info → Run anyway). The app icon, favicon and sidebar use the official logo
+(`src-tauri/app-icon.svg`, `components/logo.tsx`); after changing it, run `pnpm tauri icon src-tauri/app-icon.svg` and
+keep only the files already in `src-tauri/icons/`. The boot screens (`src-tauri/splash/`, `components/splash.tsx`) show
+the cover image with a progress bar and the version.
 
 ### Signed macOS builds
 
