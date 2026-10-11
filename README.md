@@ -20,10 +20,8 @@ Desktop builds are on the [Releases](https://github.com/agustinkassis/gorila-wal
 | Linux, Intel/AMD | `Gorilla.Wallet_<version>_amd64.AppImage` (standalone), `_amd64.deb`, `.x86_64.rpm` |
 | Linux, ARM64 | `Gorilla.Wallet_<version>_aarch64.AppImage` (standalone), `_arm64.deb`, `.aarch64.rpm` |
 
-Until the builds are signed (see [Signed macOS builds](#signed-macos-builds)): on macOS, if it says *"Apple could not
-verify…"*, press Done, then System Settings → Privacy & Security → Open Anyway (or run
-`xattr -dr com.apple.quarantine "/Applications/Gorilla Wallet.app"`); on Windows choose More info → Run anyway; on
-Linux `chmod +x` the AppImage and run it.
+macOS builds are signed with an Apple Developer ID and notarized, so they open without a warning. Windows installers
+are unsigned (More info → Run anyway); on Linux `chmod +x` the AppImage and run it.
 
 ## Run it locally
 
@@ -145,15 +143,16 @@ pnpm tauri build      # installers in src-tauri/target/release/bundle/
 
 Builds are native (Node and better-sqlite3 are bundled for the host), so each OS/arch builds on its own:
 `.github/workflows/desktop.yml` builds macOS (arm64, x64), Windows (x64, arm64) and Linux (x64, arm64) as workflow
-artifacts; a `v*` tag also creates a draft release. macOS builds are ad-hoc signed until the Developer ID secrets below
-exist; Windows installers are unsigned (SmartScreen: More info → Run anyway). App icon gorilla:
+artifacts; a `v*` tag also creates a draft release (see [Releasing](#releasing)). macOS builds are Developer ID signed
+and notarized when the secrets below exist (ad-hoc signed otherwise, except on a tag, which fails); Windows installers
+are unsigned (SmartScreen: More info → Run anyway). App icon gorilla:
 [Twemoji](https://github.com/jdecked/twemoji), CC-BY 4.0.
 
 ### Signed macOS builds
 
 macOS only opens downloaded apps without a warning when they are signed with an Apple **Developer ID** and notarized
-by Apple. The release workflow does both as soon as these repository secrets exist (GitHub → Settings → Secrets and
-variables → Actions); without them it builds ad-hoc signed, as before.
+by Apple. The workflow does both with these repository secrets (GitHub → Settings → Secrets and variables → Actions).
+They are already set; this is how to set them up again (new certificate, renewed or revoked key, another repository).
 
 | Secret | Value |
 |---|---|
@@ -172,21 +171,47 @@ variables → Actions); without them it builds ad-hoc signed, as before.
    double-click the downloaded `.cer`.
 3. **Export it**: Keychain Access → login → My Certificates → *Developer ID Application: Your Name (TEAMID)* (with its
    private key) → Export → `DeveloperID.p12`, with a password.
-4. **Create an API key for notarization**: <https://appstoreconnect.apple.com/access/integrations/api> → Team Keys →
-   **+**, access *Developer* → download `AuthKey_<KeyID>.p8` (only downloadable once) and note the Key ID and Issuer ID.
+4. **Create an API key for notarization**: <https://appstoreconnect.apple.com> → Users and Access → Integrations →
+   App Store Connect API → **Team Keys** (not *Individual Keys*: those have no Issuer ID) → **+**, access *Developer* →
+   download `AuthKey_<KeyID>.p8` (only downloadable once) and note its Key ID. The **Issuer ID** is the UUID shown
+   above that table (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, with a Copy button).
 5. **Add the secrets**:
 
    ```bash
    base64 -i DeveloperID.p12 | gh secret set APPLE_CERTIFICATE --repo agustinkassis/gorila-wallet
    gh secret set APPLE_CERTIFICATE_PASSWORD --repo agustinkassis/gorila-wallet   # prompts for it
    gh secret set APPLE_API_KEY_ID --repo agustinkassis/gorila-wallet --body "<Key ID>"
-   gh secret set APPLE_API_ISSUER --repo agustinkassis/gorila-wallet --body "<Issuer ID>"
+   pbpaste | tr -d '[:space:]"' | gh secret set APPLE_API_ISSUER --repo agustinkassis/gorila-wallet   # Issuer ID copied
    gh secret set APPLE_API_KEY_P8 --repo agustinkassis/gorila-wallet < AuthKey_<KeyID>.p8
    ```
 
-6. **Release**: bump `version` in `package.json` and push a `v*` tag. The macOS jobs import the certificate into a
-   temporary keychain, sign the app, the bundled Node and its native modules with the hardened runtime, notarize with
-   the API key and staple the ticket.
+6. **Check** with a run from Actions → Desktop → Run workflow: the macOS jobs import the certificate into a temporary
+   keychain, sign the app, the bundled Node and its native modules with the hardened runtime, notarize with the API
+   key, staple the ticket and check that Gatekeeper accepts it. Then delete the local `.p12` and `.p8`.
+
+The Developer ID certificate expires after 5 years, and the Apple Developer Program needs renewing every year: an
+expired membership fails notarization.
+
+### Releasing
+
+Every release ships the same installers: macOS (arm64, x64), Windows (x64, arm64), Linux (x64, arm64).
+
+1. On `main`, bump `version` in `package.json` (e.g. `0.1.1`), commit and push.
+2. Tag that commit with the same version and push the tag:
+
+   ```bash
+   git tag v0.1.1 && git push origin v0.1.1
+   ```
+
+3. Wait for [Actions → Desktop](https://github.com/agustinkassis/gorila-wallet/actions/workflows/desktop.yml) (about 15
+   minutes). On a tag the workflow fails rather than ship something incomplete: the tag must equal `v` + the
+   `package.json` version, the macOS apps must be Developer ID signed, notarized and accepted by Gatekeeper, and the
+   draft release is only created when all six builds succeed. A flaky failure: Re-run failed jobs (the release job
+   replaces the files of an existing draft). A failure that needs a code fix: delete the tag
+   (`git push --delete origin v0.1.1 && git tag -d v0.1.1`), fix on `main` and tag again.
+4. Open the draft on [Releases](https://github.com/agustinkassis/gorila-wallet/releases), review the generated notes
+   and files (10: two `.dmg`, two `-setup.exe`, and an AppImage, `.deb` and `.rpm` per Linux arch), and **Publish
+   release**.
 
 ## Scripts
 
