@@ -116,6 +116,9 @@ export function AppSidebar() {
             )
           })}
         </SidebarMenu>
+        <p className="px-2 font-mono text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+          Gorilla Wallet v{process.env.APP_VERSION}
+        </p>
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

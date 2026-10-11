@@ -38,9 +38,12 @@ fn main() {
                 .title("Gorilla Wallet")
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(380.0, 600.0)
-                .background_color(Color(178, 14, 24, 255)) // the splash red: no white flash between pages
+                .background_color(Color(204, 4, 4, 255)) // the splash red: no white flash between pages
                 // the app's boot screen (components/splash.tsx) only shows in the desktop app
-                .initialization_script("window.__GORILLA_NATIVE__ = true")
+                .initialization_script(format!(
+                    "window.__GORILLA_NATIVE__ = true; window.__GORILLA_VERSION__ = {:?}",
+                    app.package_info().version.to_string()
+                ))
                 // External links (explorers) open in the system browser.
                 .on_navigation(move |u| {
                     // the splash: tauri://localhost (macOS, Linux), http://tauri.localhost (Windows) or the dev server

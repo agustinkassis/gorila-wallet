@@ -1,4 +1,4 @@
-import { GorillaLogo } from "@/components/logo"
+import cover from "@/components/splash.webp"
 
 /**
  * Desktop app boot screen. The window opens on the same screen served locally (src-tauri/splash) while the server
@@ -7,11 +7,13 @@ import { GorillaLogo } from "@/components/logo"
  */
 const CSS = `
 #splash{display:none}
-[data-boot] #splash{position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:16px;background:linear-gradient(160deg,#d81e2a 0%,#b20e18 50%,#6b0710 100%);color:#fff;transition:opacity .35s ease,visibility .35s}
+[data-boot] #splash{position:fixed;inset:0;z-index:2147483647;display:block;background:#cc0404;transition:opacity .35s ease,visibility .35s}
 [data-boot=done] #splash{opacity:0;visibility:hidden;pointer-events:none}
-#splash h1{margin:0;font:800 clamp(28px,6vw,44px)/1 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.18em;text-indent:.18em;text-align:center}
-#splash svg{width:clamp(112px,24vw,168px);height:auto;margin-bottom:4px}
-#splash .track{width:min(240px,60vw);height:4px;border-radius:999px;background:rgba(255,255,255,.25);overflow:hidden}
+#splash img{width:100%;height:100%;object-fit:cover;object-position:center top}
+@media (max-aspect-ratio:1/1){#splash img{object-fit:contain;object-position:center}}
+#splash .foot{position:absolute;left:50%;bottom:max(24px,5vh);display:flex;flex-direction:column;align-items:center;gap:10px;transform:translateX(-50%)}
+#splash .track{width:min(320px,60vw);height:8px;border-radius:999px;background:rgba(0,0,0,.6);box-shadow:0 0 0 1px rgba(255,255,255,.35),0 2px 16px rgba(0,0,0,.5);overflow:hidden}
+#splash .version{padding:4px 8px;border-radius:999px;background:rgba(0,0,0,.6);color:#fff;font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em}
 #splash-bar{height:100%;border-radius:inherit;background:#fff;transform:scaleX(0);transform-origin:left;transition:transform .2s ease-out}
 `
 
@@ -19,6 +21,7 @@ const CSS = `
 // fully parsed, since more keep appearing). Done once everything has loaded; 20 s at most, never stuck on a slow asset.
 const PROGRESS = `(function(){
 var root=document.documentElement;if(!root.dataset.boot)return;
+var img=document.querySelector("#splash img");img.src=img.dataset.src;
 var bar=document.getElementById("splash-bar"),shown=0,start=Date.now();
 function step(){
 var urls={},total=0,loaded=0,seen={};
@@ -46,10 +49,14 @@ export function Splash() {
   return (
     <>
       <div id="splash" aria-hidden="true">
-        <GorillaLogo />
-        <h1>GORILA WALLET</h1>
-        <div className="track">
-          <div id="splash-bar" />
+        {/* src set by PROGRESS only in the desktop app: the web never downloads it */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img data-src={cover.src} alt="" suppressHydrationWarning />
+        <div className="foot">
+          <div className="track">
+            <div id="splash-bar" />
+          </div>
+          <span className="version">v{process.env.APP_VERSION}</span>
         </div>
       </div>
       <script dangerouslySetInnerHTML={{ __html: PROGRESS }} />
